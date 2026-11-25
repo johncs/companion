@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>@app_id@</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Companion</name>
+  <summary>Native GNOME AI agent for local models and projects</summary>
+
+  <description>
+    <p>
+      Companion is a native GNOME AI agent application built with GTK4 and libadwaita.
+      Run local GGUF models out of the box, organize folder-scoped Projects, attach
+      documents and images, and collaborate with AI safely on your desktop.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">@app_id@.desktop</launchable>
+
+  <url type="homepage">https://github.com/companion-app/companion</url>
+
+  <developer id="io.github.companion">
+    <name>Companion Contributors</name>
+  </developer>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-11-20">
+      <description>
+        <p>Initial Sprint 0 project skeleton.</p>
+      </description>
+    </release>
+  </releases>
+</component>

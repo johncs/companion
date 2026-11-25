@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Companion
+Comment=Native GNOME AI agent with local GGUF models and Projects
+Exec=companion
+Icon=@app_id@
+Terminal=false
+Type=Application
+Categories=Utility;Office;Development;GTK;
+Keywords=AI;LLM;Agent;Chat;GGUF;Local;
+StartupNotify=true

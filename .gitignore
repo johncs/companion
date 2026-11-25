@@ -1,0 +1,27 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# Meson / Ninja
+/build/
+/_build/
+/builddir/
+
+# Flatpak
+/.flatpak-builder/
+/repo/
+*.flatpak
+
+# Local SQLite / dev data
+*.db
+*.db-wal
+*.db-shm
+
+# Editors & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
