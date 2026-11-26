@@ -1,0 +1,16 @@
+[package]
+name = "companion-inference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+companion-core.workspace = true
+anyhow.workspace = true
+encoding_rs.workspace = true
+llama-cpp-2.workspace = true
+tokio.workspace = true
+tracing.workspace = true

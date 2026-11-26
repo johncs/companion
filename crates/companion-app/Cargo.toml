@@ -1,0 +1,32 @@
+[package]
+name = "companion-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A native GNOME AI agent application with embedded local inference"
+
+[[bin]]
+name = "companion"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+companion-core.workspace = true
+companion-storage.workspace = true
+companion-models.workspace = true
+companion-agent.workspace = true
+companion-inference.workspace = true
+
+relm4.workspace = true
+gtk.workspace = true
+adw.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true

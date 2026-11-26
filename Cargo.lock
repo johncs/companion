@@ -265,28 +265,98 @@ dependencies = [
 ]
 
 [[package]]
-name = "companion"
+name = "companion-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "encoding_rs",
- "futures-util",
- "gettext-rs",
+ "companion-core",
+ "companion-storage",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "companion-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "companion-agent",
+ "companion-core",
+ "companion-inference",
+ "companion-models",
+ "companion-storage",
  "gtk4",
  "libadwaita",
- "llama-cpp-2",
+ "relm4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "companion-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gettext-rs",
  "pdf-extract",
  "pulldown-cmark",
- "relm4",
- "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
  "syntect",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "companion-inference"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "companion-core",
+ "encoding_rs",
+ "llama-cpp-2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "companion-models"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "companion-core",
+ "companion-storage",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "companion-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "companion-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
