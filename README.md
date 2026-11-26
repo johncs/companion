@@ -51,12 +51,12 @@ Companion aims to make local AI on Linux **effortless, private, and genuinely na
 
 - **Instant Startup & Paginated Storage:** The GTK4/Adwaita window opens immediately while GGUF metadata and syntax sets warm up in the background. SQLite runs in WAL mode with keyset-paginated message loading and FTS5 full-text search.
 - **Virtualized Chat Stream (`gtk::ListView`):** Messages render via `gio::ListStore` + `SignalListItemFactory` with `O(viewport)` widget recycling, throttled token-streaming flushes, and cached Markdown/`syntect` code-block highlighting.
-- `src/core/` — Domain types (`ThinkingLevel`, `AssistantPersonality`), cached Markdown/`syntect` parser, attachment extraction, and shared Tokio runtime.
-- `src/agent/` — Tool-call parser, permission engine, path-jailed file/directory tools (`list_files`, `read_file`, `search_files`, `write_file`, `create_directory`, `move_path`, `delete_file`, `delete_directory`), and privacy-first web tools (`web_search`, `fetch_url`).
-- `src/inference/` — `ModelProvider` trait, streaming `ChatEvent` / `<think>` parser, and `LlamaCppProvider`.
-- `src/models/` — Hardware RAM/GPU probe, GGUF header metadata reader, Hugging Face GGUF client & resumable downloader, and friendly model naming.
-- `src/storage/` — WAL-mode SQLite with versioned migrations, FTS5 search, paginated message loading, conversations, granted folders, and models.
-- `src/ui/` — Relm4 components, virtualized `gtk::ListView` chat history, Chat Controls, Files & Folders manager, and Settings (`AdwPreferencesDialog`).
+- **`crates/companion-core`** — Domain types (`ThinkingLevel`, `AssistantPersonality`), `ModelProvider` trait, cached Markdown/`syntect` parser, attachment extraction, `gettext` helpers, and shared Tokio runtime (zero GTK, SQLite, or `llama.cpp` dependencies).
+- **`crates/companion-storage`** — WAL-mode SQLite with atomic versioned migrations, FTS5 search, paginated message loading, conversations, granted folders, and models.
+- **`crates/companion-models`** — Hardware RAM/GPU probe, GGUF header metadata reader, Hugging Face GGUF client, `DownloadManager`, and friendly model naming.
+- **`crates/companion-agent`** — `AgentRunner`, `ToolRegistry`, tool-call parser, permission engine, path-jailed file/directory tools (`list_files`, `read_file`, `search_files`, `write_file`, `create_directory`, `move_path`, `delete_file`, `delete_directory`), privacy-first web tools (`web_search`, `fetch_url`), and title generation.
+- **`crates/companion-inference`** — Embedded `LlamaCppProvider`, streaming `ThinkStreamParser`, and `StopSequenceFilter`.
+- **`crates/companion-app`** — Relm4 / GTK4 / `libadwaita` UI shell, virtualized `gtk::ListView` chat history, Chat Controls, Files & Folders manager, and Settings (`AdwPreferencesDialog`).
 
 ---
 
@@ -71,7 +71,14 @@ Companion aims to make local AI on Linux **effortless, private, and genuinely na
 ### Build & Test
 
 ```bash
-cargo test && cargo run
+# Run the full workspace test suite and launch the app
+cargo test --workspace && cargo run
+
+# Fast headless tests for domain/logic crates (no GTK4 or llama.cpp build)
+cargo test -p companion-core -p companion-storage -p companion-models -p companion-agent
+
+# Full verification gate (fmt, clippy, workspace tests, and 400-line file budget)
+./scripts/ci-check.sh
 ```
 
 > **Note (Fedora `toolbox` / immutable systems):** Ensure `/usr/bin` precedes custom shims (`export PATH=/usr/bin:$PATH`) when building inside a `toolbox` container.
