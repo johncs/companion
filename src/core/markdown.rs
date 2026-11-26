@@ -417,10 +417,31 @@ fn flush_text_block(text_buf: &mut String, blocks: &mut Vec<MarkdownBlock>) {
     text_buf.clear();
 }
 
+fn resolve_syntax(lang: &str) -> &'static syntect::parsing::SyntaxReference {
+    if let Some(syn) = SYNTAX_SET.find_syntax_by_token(lang) {
+        return syn;
+    }
+    let fallback = match lang.trim().to_ascii_lowercase().as_str() {
+        "typescript" | "ts" | "tsx" | "mts" | "cts" | "jsx" | "mjs" | "cjs" => "js",
+        "jsonc" | "json5" => "json",
+        "toml" | "ini" | "conf" => "yaml",
+        "zsh" | "fish" | "ksh" | "dockerfile" | "containerfile" => "sh",
+        "scss" | "sass" | "less" => "css",
+        "kotlin" | "kt" | "kts" | "swift" | "dart" => "java",
+        _ => "",
+    };
+    if !fallback.is_empty()
+        && let Some(syn) = SYNTAX_SET.find_syntax_by_token(fallback)
+    {
+        return syn;
+    }
+    SYNTAX_SET.find_syntax_plain_text()
+}
+
 /// Syntax-highlight `code` into Pango-compatible `<span>` markup using the named `syntect` theme.
 pub fn highlight_code_pango(code: &str, language: Option<&str>, theme_name: &str) -> String {
     let syntax = language
-        .and_then(|lang| SYNTAX_SET.find_syntax_by_token(lang))
+        .map(resolve_syntax)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
     let theme = &THEME_SET.themes[theme_name];
@@ -450,6 +471,25 @@ fn append_styled_span(out: &mut String, style: Style, text: &str) {
         "<span foreground=\"#{:02x}{:02x}{:02x}\">{escaped}</span>",
         fg.r, fg.g, fg.b
     ));
+}
+
+/// Formats a fenced code block's language tag for display by capitalizing its
+/// first character (e.g. `"typescript"` -> `"Typescript"`, `"rust"` -> `"Rust"`).
+pub fn format_code_language(language: Option<&str>) -> String {
+    let raw = language
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("text");
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out = String::with_capacity(raw.len());
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+            out
+        }
+        None => "Text".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -519,5 +559,30 @@ mod tests {
             }
             _ => panic!("expected task list text block"),
         }
+    }
+
+    #[test]
+    fn highlights_typescript_and_respects_light_and_dark_themes() {
+        let ts_dark = highlight_code_pango(
+            "const email: string = 'a@b.com';",
+            Some("typescript"),
+            "base16-ocean.dark",
+        );
+        let ts_light = highlight_code_pango(
+            "const email: string = 'a@b.com';",
+            Some("typescript"),
+            "InspiredGitHub",
+        );
+        assert_ne!(ts_dark, ts_light);
+        assert!(ts_dark.matches("<span foreground=").count() > 2);
+    }
+
+    #[test]
+    fn formats_code_language_header() {
+        assert_eq!(format_code_language(Some("typescript")), "Typescript");
+        assert_eq!(format_code_language(Some("rust")), "Rust");
+        assert_eq!(format_code_language(Some("  python ")), "Python");
+        assert_eq!(format_code_language(None), "Text");
+        assert_eq!(format_code_language(Some("")), "Text");
     }
 }

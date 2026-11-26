@@ -54,9 +54,9 @@ textview.composer-input text {
 }
 
 .code-card {
-    background-color: alpha(@window_fg_color, 0.04);
+    background-color: @view_bg_color;
     border-radius: 14px;
-    border: 1px solid alpha(@window_fg_color, 0.08);
+    border: 1px solid alpha(@window_fg_color, 0.14);
 }
 
 .thinking-expander {

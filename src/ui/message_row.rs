@@ -1,12 +1,12 @@
 //! Recycled `gtk::ListView` row factory for chat messages.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::core::markdown::MarkdownBlock;
+use crate::core::markdown::{MarkdownBlock, format_code_language};
 use crate::i18n::gettext;
 use crate::ui::message_dialogs::{
     copy_text_with_feedback, present_edit_message_dialog, present_message_info_dialog,
@@ -36,6 +36,7 @@ struct RowWidgets {
     copy_text: Rc<RefCell<String>>,
     rendered_message_id: Rc<RefCell<String>>,
     rendered_blocks: Rc<RefCell<Vec<MarkdownBlock>>>,
+    rendered_is_dark: Rc<Cell<bool>>,
 }
 
 type SignalSlot = Rc<RefCell<Option<(MessageObject, glib::SignalHandlerId)>>>;
@@ -261,7 +262,39 @@ pub fn build_message_list_factory(
             copy_text,
             rendered_message_id: Rc::new(RefCell::new(String::new())),
             rendered_blocks: Rc::new(RefCell::new(Vec::new())),
+            rendered_is_dark: Rc::new(Cell::new(adw::StyleManager::default().is_dark())),
         };
+
+        // Re-render visible code blocks immediately when the user switches Light/Dark theme.
+        let theme_handler_id = {
+            let active_msg_obj = widgets.active_msg_obj.clone();
+            let rendered_blocks = widgets.rendered_blocks.clone();
+            let rendered_is_dark = widgets.rendered_is_dark.clone();
+            let blocks_weak = widgets.blocks_box.downgrade();
+            adw::StyleManager::default().connect_dark_notify(move |mgr| {
+                let Some(blocks_box) = blocks_weak.upgrade() else {
+                    return;
+                };
+                let Some(msg_obj) = active_msg_obj.borrow().clone() else {
+                    return;
+                };
+                let entry = msg_obj.entry();
+                update_blocks_box(
+                    &blocks_box,
+                    &rendered_blocks,
+                    &rendered_is_dark,
+                    &entry.blocks,
+                    mgr.is_dark(),
+                    entry.is_streaming,
+                );
+            })
+        };
+        let theme_handler_slot = Rc::new(RefCell::new(Some(theme_handler_id)));
+        clamp.connect_destroy(move |_| {
+            if let Some(id) = theme_handler_slot.borrow_mut().take() {
+                adw::StyleManager::default().disconnect(id);
+            }
+        });
 
         let handler_slot: SignalSlot = Rc::new(RefCell::new(None));
 
@@ -318,6 +351,7 @@ pub fn build_message_list_factory(
             disconnect_slot(&slot);
         }
         if let Some(widgets) = get_row_widgets(&clamp) {
+            *widgets.active_msg_obj.borrow_mut() = None;
             widgets.rendered_message_id.borrow_mut().clear();
             widgets.rendered_blocks.borrow_mut().clear();
         }
@@ -448,6 +482,7 @@ fn bind_entry_inner(
     update_blocks_box(
         &widgets.blocks_box,
         &widgets.rendered_blocks,
+        &widgets.rendered_is_dark,
         &entry.blocks,
         is_dark,
         entry.is_streaming,
@@ -457,18 +492,21 @@ fn bind_entry_inner(
 fn update_blocks_box(
     blocks_box: &gtk::Box,
     rendered_cache: &Rc<RefCell<Vec<MarkdownBlock>>>,
+    rendered_is_dark: &Rc<Cell<bool>>,
     new_blocks: &[MarkdownBlock],
     is_dark: bool,
     is_streaming: bool,
 ) {
     let prev = rendered_cache.borrow();
-    if prev.as_slice() == new_blocks {
+    let theme_matches = rendered_is_dark.get() == is_dark;
+    if theme_matches && prev.as_slice() == new_blocks {
         return;
     }
 
-    // Fast path during streaming: if all prior blocks match, only update/replace the tail.
+    // Fast path during streaming: if all prior blocks match (and theme didn't flip), only update/replace the tail.
     let prefix_len = prev.len().saturating_sub(1);
-    if !prev.is_empty()
+    if theme_matches
+        && !prev.is_empty()
         && new_blocks.len() >= prev.len()
         && prev[..prefix_len] == new_blocks[..prefix_len]
     {
@@ -528,6 +566,7 @@ fn update_blocks_box(
         blocks_box.append(&build_block_widget(block, is_dark));
     }
     *rendered_cache.borrow_mut() = new_blocks.to_vec();
+    rendered_is_dark.set(is_dark);
 }
 
 fn build_block_widget(block: &MarkdownBlock, is_dark: bool) -> gtk::Widget {
@@ -652,7 +691,7 @@ fn build_code_block(language: Option<&str>, raw_code: &str, pango_markup: &str) 
         .build();
 
     let lang_label = gtk::Label::builder()
-        .label(language.unwrap_or("text"))
+        .label(&format_code_language(language))
         .xalign(0.0)
         .hexpand(true)
         .css_classes(["caption-heading", "dim-label"])
