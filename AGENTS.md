@@ -90,3 +90,15 @@ Before finishing any code edit or feature, verify every applicable item:
 10. **Safe Storage Migrations:** Do any SQLite schema changes use a versioned migration (`PRAGMA user_version` in `src/storage/schema.rs`) so existing user databases upgrade without data loss?
 11. **Meaningful, Concise Comments:** Do non-obvious invariants, concurrency/locking rules, or GNOME/GTK conventions have brief comments explaining *why* (without bloating self-explanatory code)?
 
+---
+
+## 7. Commit Format
+Use **Conventional Commits** for all commits:
+```text
+<type>(<optional-scope>): <short imperative summary>
+```
+- **Types:** `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `chore`
+- **Scopes (optional):** `ui`, `chat_view`, `composer`, `agent`, `inference`, `models`, `storage`, `core`, `i18n`
+- **Examples:** `feat(ui): add model context length slider`, `fix(agent): handle query params in URL leak check`, `refactor(chat_view): split streaming coalescer into submodule`
+
+
