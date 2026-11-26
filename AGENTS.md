@@ -22,7 +22,10 @@ cargo test && cargo run
 - `src/storage/` — WAL-mode SQLite (`PRAGMA user_version` migrations in `schema.rs`, FTS5 search, paginated messages, models, projects).
 - `src/ui/` — Relm4 components, `gtk::ListView` row factories, `AdwPreferencesDialog` settings, and `ui/icons.rs` for centralized icon names.
 
-Keep files small and single-purpose. Never duplicate Tokio runtimes, icon paths, or destructive confirmation dialogs (`ui::widgets::present_destructive_confirm`).
+### Coding Paradigm & Modularity Standards
+- **Small, Single-Purpose Files & Functions:** Target **<= 400 lines per `.rs` file** and **<= 50 lines per function**. When a feature or Relm4 component grows beyond that, split it into a folder module (`mod.rs` + focused submodules) rather than mixing layout, async orchestration, and business rules in one file.
+- **Separate Pure Logic from GTK/Relm4:** State machines, parsers, path/privacy guards, formatting, and validation must live in pure Rust functions and structs with **zero GTK/Relm4 dependencies** so they can be unit-tested directly with `cargo test`. Keep Relm4/GTK modules thin: wire widgets, forward events, and render state.
+- **Reuse Shared Plumbing:** Keep `core::runtime()` → channel → `glib::MainContext` async bridges, inline retry rows, progress indicators, icon paths (`ui/icons.rs`), and destructive confirmation dialogs (`ui::widgets::present_destructive_confirm`) in centralized helpers rather than duplicating boilerplate across modules.
 
 ---
 
@@ -77,10 +80,10 @@ Before finishing any code edit or feature, verify every applicable item:
 
 1. **Loading & Error Handling:** Are all async or fallible paths covered with non-blocking loading indicators, clean error recovery (toasts, inline retry, or cleanup of partial UI), and no `.expect()`/`panic!` on user or I/O data?
 2. **Performance & Responsiveness:** Does the change keep the GTK main thread free (offloading heavy I/O, parsing, or network work to `core::runtime()` and using multicore processing like `core::parallel_chunks` where beneficial)?
-3. **Clean Architecture & Reusability:** Is the code well-structured into small, single-purpose functions and reusable components without duplicated logic?
+3. **Clean Architecture & Reusability:** Are files (`<= 400` lines) and functions (`<= 50` lines) small and single-purpose, with pure logic separated from GTK/Relm4 and no duplicated plumbing?
 4. **No Leftovers:** Were all unused variables, dead code, obsolete styling, and unused translation strings or `POTFILES.in` entries cleaned up?
 5. **GNOME HIG & Localization:** Does the UI follow GNOME HIG (`libadwaita` patterns, virtual scrolling, escaped Pango markup), and are all user-facing strings wrapped in `gettext` / `tr_f`?
-6. **Tests:** Have unit tests been added or updated for any new non-UI logic, parsing, or edge cases?
+6. **Tests:** Have unit tests been added or updated for any new non-UI logic, state transitions, parsing, or edge cases (kept free of GTK dependencies)?
 7. **Centralized Constants & Shared State:** Are shared constants, icons (`ui/icons.rs`), and global utilities (`core::runtime()`) placed in their centralized modules rather than hardcoded or duplicated?
 8. **Privacy & Portability:** Are there zero hardcoded personal paths (e.g., `/home/<user>`), secrets, or machine-specific assumptions in code, tests, or documentation?
 9. **Accessibility & Keyboard Navigation:** Do icon-only buttons have clear `tooltip_text` / accessible labels, and do dialogs and views work cleanly with keyboard navigation (`Tab`, `Esc`, `Enter`)?

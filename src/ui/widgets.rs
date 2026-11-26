@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use adw::prelude::*;
-use gtk::{gdk, gio};
+use gtk::{gdk, gio, glib};
 
 use crate::i18n::gettext;
 
@@ -202,6 +202,24 @@ pub fn present_image_lightbox(parent: &impl IsA<gtk::Widget>, file_name: &str, f
 
     dialog.set_child(Some(&toolbar));
     dialog.present(Some(parent));
+}
+
+/// Run blocking work on the shared Tokio runtime and deliver its result on the GTK main loop.
+pub fn spawn_blocking_ui<T, F, G>(work: F, on_done: G)
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    G: FnOnce(T) + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel::<T>();
+    crate::core::runtime().spawn_blocking(move || {
+        let _ = tx.send(work());
+    });
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(res) = rx.await {
+            on_done(res);
+        }
+    });
 }
 
 fn find_listbox(root: &gtk::Widget) -> Option<gtk::ListBox> {
