@@ -7,15 +7,17 @@ All contributors and AI agents working in this repo must follow these rules.
 ---
 
 ## 1. Build & Test Commands
-Inside Fedora `toolbox` (using `/usr/bin` toolchain):
+Requires Rust (stable toolchain) and native development libraries (`GTK4`, `libadwaita`, `SQLite`, `pkg-config`, `cmake`, and a C/C++ compiler for embedded `llama.cpp`).
+
 ```bash
-export PATH=/usr/bin:$PATH
 cargo test && cargo run
 ```
+*(If building inside a Fedora `toolbox` or container with non-standard `PATH` ordering, prepend `export PATH=/usr/bin:$PATH`.)*
 
 ---
 
 ## 2. Architecture & Module Boundaries
+- `src/agent/` — Tool-call parser, `PermissionEngine`, path-jailed file tools (`tools/`), and privacy-first web search/fetch (`web_search/`).
 - `src/core/` — Domain types (`ThinkingLevel`), cached Markdown/syntect parser, and the shared Tokio runtime (`core::runtime()`).
 - `src/inference/` — `ModelProvider` trait, `ChatEvent`, `<think>` stream parser, and `LlamaCppProvider` (CPU + Vulkan).
 - `src/models/` — Hardware RAM/GPU probe, Hugging Face GGUF client & resumable downloader, and friendly model naming.
@@ -25,7 +27,7 @@ cargo test && cargo run
 ### Coding Paradigm & Modularity Standards
 - **Small, Single-Purpose Files & Functions:** Target **<= 400 lines per `.rs` file** and **<= 50 lines per function**. When a feature or Relm4 component grows beyond that, split it into a folder module (`mod.rs` + focused submodules) rather than mixing layout, async orchestration, and business rules in one file.
 - **Separate Pure Logic from GTK/Relm4:** State machines, parsers, path/privacy guards, formatting, and validation must live in pure Rust functions and structs with **zero GTK/Relm4 dependencies** so they can be unit-tested directly with `cargo test`. Keep Relm4/GTK modules thin: wire widgets, forward events, and render state.
-- **Reuse Shared Plumbing:** Keep `core::runtime()` → channel → `glib::MainContext` async bridges, inline retry rows, progress indicators, icon paths (`ui/icons.rs`), and destructive confirmation dialogs (`ui::widgets::present_destructive_confirm`) in centralized helpers rather than duplicating boilerplate across modules.
+- **Reuse Shared Plumbing:** Keep `core::runtime()` → channel → `glib::MainContext` async bridges (`ui::widgets::spawn_blocking_ui`), inline retry rows, progress indicators, icon paths (`ui/icons.rs`), and destructive confirmation dialogs (`ui::widgets::present_destructive_confirm`) in centralized helpers rather than duplicating boilerplate across modules.
 
 ---
 
@@ -66,7 +68,7 @@ Companion must **never freeze, stutter, or lag**:
    - Cache decoded `gdk::Texture`s (bounded in-memory cache) so `gtk::ListView` row recycling never re-decodes images on scroll.
    - Cache completed `syntect` code-block highlights during token streaming to avoid `O(N²)` re-highlighting.
 3. **Throttle & Debounce High-Frequency Events:**
-   - Throttle streaming UI flushes (~30 ms / 33 FPS) rather than re-laying out GTK widgets on every token.
+   - Throttle streaming UI flushes (`~80 ms` via `STREAM_UI_FLUSH_INTERVAL`) rather than re-laying out GTK widgets on every token.
    - Debounce live search inputs (~150 ms) before querying FTS5 or rebuilding lists.
 4. **Reuse Shared Clients & Runtimes:**
    - Reuse `core::runtime()` for async tasks and shared `reqwest::Client` instances for connection/TLS pooling.
