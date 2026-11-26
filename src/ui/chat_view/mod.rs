@@ -18,10 +18,10 @@ use gtk::{gdk, gio};
 use relm4::prelude::*;
 
 use crate::agent::permissions::PermissionEngine;
+use crate::core::prompt::default_system_prompt;
 use crate::core::{ThinkingLevel, runtime};
 use crate::i18n::{gettext, tr_f};
 use crate::inference::llama_cpp::LlamaCppProvider;
-use crate::storage::conversations::default_system_prompt;
 use crate::storage::{AttachmentRecord, Database};
 use crate::ui::composer::{ComposerModel, ComposerMsg, ComposerOutput};
 use crate::ui::message_object::MessageObject;
@@ -342,40 +342,12 @@ impl SimpleComponent for ChatViewModel {
                 self.is_loading = true;
                 self.is_empty = false;
 
-                let loaded_conv = self.db.get_conversation(&conversation_id).ok().flatten();
-                self.active_system_prompt = loaded_conv
-                    .as_ref()
-                    .and_then(|c| c.system_prompt.clone())
-                    .unwrap_or_else(|| default_system_prompt().to_string());
-                self.active_thinking_level = loaded_conv
-                    .as_ref()
-                    .map(|c| c.thinking_level)
-                    .unwrap_or_default();
-                self.web_search_enabled = loaded_conv
-                    .as_ref()
-                    .map(|c| c.web_search_enabled)
-                    .unwrap_or(false);
-                self.composer.emit(ComposerMsg::SetSystemPrompt(
-                    self.active_system_prompt.clone(),
-                ));
-                self.composer
-                    .emit(ComposerMsg::SetThinkingLevel(self.active_thinking_level));
-                self.composer
-                    .emit(ComposerMsg::SetWebSearchEnabled(self.web_search_enabled));
-                let granted = self
-                    .db
-                    .list_conversation_folders(&conversation_id)
-                    .unwrap_or_default();
-                self.composer
-                    .emit(ComposerMsg::SetGrantedFolders(granted));
-
                 let db = self.db.clone();
                 let conv_id = conversation_id;
-                let sys_prompt_len = self.active_system_prompt.len();
                 let input_sender = sender.input_sender().clone();
 
                 runtime().spawn_blocking(move || {
-                    let result = load_and_parse_page(&db, &conv_id, None, sys_prompt_len);
+                    let result = load_and_parse_page(&db, &conv_id, None, 0);
                     let _ = input_sender.send(ChatViewMsg::ConversationPageLoaded {
                         conversation_id: conv_id,
                         request_seq: req_seq,
@@ -396,6 +368,23 @@ impl SimpleComponent for ChatViewModel {
                 self.is_loading = false;
                 match result {
                     Ok(data) => {
+                        if let Some(loaded_conv) = data.conversation {
+                            self.active_system_prompt = loaded_conv
+                                .system_prompt
+                                .unwrap_or_else(|| default_system_prompt().to_string());
+                            self.active_thinking_level = loaded_conv.thinking_level;
+                            self.web_search_enabled = loaded_conv.web_search_enabled;
+                            self.composer.emit(ComposerMsg::SetSystemPrompt(
+                                self.active_system_prompt.clone(),
+                            ));
+                            self.composer
+                                .emit(ComposerMsg::SetThinkingLevel(self.active_thinking_level));
+                            self.composer
+                                .emit(ComposerMsg::SetWebSearchEnabled(self.web_search_enabled));
+                        }
+                        if let Some(granted) = data.granted_folders {
+                            self.composer.emit(ComposerMsg::SetGrantedFolders(granted));
+                        }
                         self.has_more_pages = data.has_more_pages;
                         self.oldest_loaded_ts = data.oldest_loaded_ts;
                         let objs: Vec<MessageObject> = data

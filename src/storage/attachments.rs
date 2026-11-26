@@ -18,25 +18,24 @@ impl Database {
         if attachments.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().expect("database mutex poisoned");
-        let tx = conn.transaction()?;
-        for att in attachments {
-            tx.execute(
-                "INSERT INTO attachments (id, message_id, file_name, mime_type, file_path, extracted_text, byte_size)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    att.id,
-                    message_id,
-                    att.file_name,
-                    att.mime_type,
-                    att.file_path,
-                    att.extracted_text,
-                    att.byte_size,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.with_tx(|tx| {
+            for att in attachments {
+                tx.execute(
+                    "INSERT INTO attachments (id, message_id, file_name, mime_type, file_path, extracted_text, byte_size)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        att.id,
+                        message_id,
+                        att.file_name,
+                        att.mime_type,
+                        att.file_path,
+                        att.extracted_text,
+                        att.byte_size,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Batch-fetch attachments for many `message_ids` in a single SQL query (avoids N+1 queries).
@@ -56,14 +55,15 @@ impl Database {
              WHERE message_id IN ({placeholders})"
         );
 
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(message_ids.iter()), map_attachment)?;
-        for row in rows {
-            let att = row?;
-            map.entry(att.message_id.clone()).or_default().push(att);
-        }
-        Ok(map)
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(message_ids.iter()), map_attachment)?;
+            for row in rows {
+                let att = row?;
+                map.entry(att.message_id.clone()).or_default().push(att);
+            }
+            Ok(map)
+        })
     }
 }
 

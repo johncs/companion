@@ -7,11 +7,11 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use crate::core::ThinkingLevel;
+use crate::core::prompt::default_system_prompt;
 use crate::i18n::{gettext, tr_f};
 use crate::models::gguf::{context_presets_up_to, format_context_label, format_short_context};
 use crate::models::{detect_gguf_max_context, friendly_model_name};
 use crate::storage::ModelRecord;
-use crate::storage::conversations::default_system_prompt;
 
 /// Present the unified Chat Controls [`adw::Dialog`].
 #[allow(clippy::too_many_arguments)]

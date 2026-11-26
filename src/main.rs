@@ -35,7 +35,7 @@ fn main() {
                     let _ = db.set_user_name(&real);
                 }
             }
-            if let Err(err) = db.sync_managed_models(&paths.models_dir) {
+            if let Err(err) = models::registry::ModelRegistryService::sync_managed_models(&db, &paths.models_dir) {
                 tracing::warn!("Failed to synchronize managed models: {err}");
             }
             let app = RelmApp::new(APP_ID);

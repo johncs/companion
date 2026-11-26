@@ -127,12 +127,15 @@ pub(super) fn launch_entry_task(
                 let rid_reg = repo_id.clone();
                 let fname_reg = filename.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(record) = db_reg.register_local_gguf(
-                        Some(dname_reg),
-                        &dpath_reg,
-                        mpath_reg.as_deref(),
-                        Some(rid_reg.clone()),
-                    ) && db_reg.get_active_model_id().ok().flatten().is_none()
+                    if let Ok(record) =
+                        crate::models::registry::ModelRegistryService::register_local_gguf(
+                            &db_reg,
+                            Some(dname_reg),
+                            &dpath_reg,
+                            mpath_reg.as_deref(),
+                            Some(rid_reg.clone()),
+                        )
+                        && db_reg.get_active_model_id().ok().flatten().is_none()
                     {
                         let _ = db_reg.set_active_model_id(Some(&record.id));
                     }

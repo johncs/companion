@@ -466,7 +466,10 @@ fn build_refresh_installed_callback(
 
         spawn_blocking_ui(
             move || {
-                let _ = db_bg.sync_managed_models(&models_dir_bg);
+                let _ = crate::models::registry::ModelRegistryService::sync_managed_models(
+                    &db_bg,
+                    &models_dir_bg,
+                );
                 let models = db_bg.list_models().unwrap_or_default();
                 stat_models_parallel(models)
             },

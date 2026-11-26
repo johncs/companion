@@ -366,22 +366,31 @@ impl ChatViewModel {
                     maybe_scroll_bottom(&scroller);
                 }
 
-                if let Ok(saved) = db.insert_message(NewMessage {
-                    conversation_id: &conv_id,
-                    role: MessageRole::Assistant,
-                    content: &full_answer,
-                    reasoning_content: r_opt,
-                    thinking_level: Some(thinking_level),
-                    model_name: Some(&model_display_name),
-                    execution_device: Some(execution_device),
-                    token_count: total_completion_tokens,
-                    generation_ms: Some(elapsed_ms),
-                }) {
-                    for mut tc in recorded_tools {
-                        tc.message_id = saved.id.clone();
-                        let _ = db.insert_tool_call(&tc);
-                    }
-                }
+                let db_save = db.clone();
+                let conv_save = conv_id.clone();
+                let answer_save = full_answer.clone();
+                let reasoning_save = (!full_reasoning.is_empty()).then(|| full_reasoning.clone());
+                let model_name_save = model_display_name.clone();
+                let _ = runtime()
+                    .spawn_blocking(move || {
+                        if let Ok(saved) = db_save.insert_message(NewMessage {
+                            conversation_id: &conv_save,
+                            role: MessageRole::Assistant,
+                            content: &answer_save,
+                            reasoning_content: reasoning_save.as_deref(),
+                            thinking_level: Some(thinking_level),
+                            model_name: Some(&model_name_save),
+                            execution_device: Some(execution_device),
+                            token_count: total_completion_tokens,
+                            generation_ms: Some(elapsed_ms),
+                        }) {
+                            for mut tc in recorded_tools {
+                                tc.message_id = saved.id.clone();
+                                let _ = db_save.insert_tool_call(&tc);
+                            }
+                        }
+                    })
+                    .await;
             }
             if is_visible {
                 let _ = composer_sender.send(ComposerMsg::SetGenerating(false));

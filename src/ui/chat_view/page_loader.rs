@@ -3,12 +3,16 @@
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::storage::{AttachmentRecord, Database, ToolCallRecord};
+use crate::storage::{
+    AttachmentRecord, Conversation, ConversationFolder, Database, ToolCallRecord,
+};
 
 pub(super) const PAGE_SIZE: usize = 20;
 
 #[derive(Debug)]
 pub struct LoadedPageData {
+    pub(super) conversation: Option<Conversation>,
+    pub(super) granted_folders: Option<Vec<ConversationFolder>>,
     pub(super) items: Vec<(
         crate::storage::entities::Message,
         Vec<AttachmentRecord>,
@@ -41,6 +45,20 @@ pub(super) fn load_and_parse_page(
     before_created_at: Option<i64>,
     sys_prompt_len: usize,
 ) -> Result<LoadedPageData, String> {
+    let (conversation, granted_folders) = if before_created_at.is_none() {
+        (
+            db.get_conversation(conv_id).ok().flatten(),
+            Some(db.list_conversation_folders(conv_id).unwrap_or_default()),
+        )
+    } else {
+        (None, None)
+    };
+    let effective_sys_len = conversation
+        .as_ref()
+        .and_then(|c| c.system_prompt.as_deref())
+        .map(str::len)
+        .unwrap_or(sys_prompt_len);
+
     let messages = db
         .list_messages_page(conv_id, before_created_at, PAGE_SIZE)
         .map_err(|e| e.to_string())?;
@@ -51,7 +69,7 @@ pub(super) fn load_and_parse_page(
     let mut att_map = db.list_attachments_for_messages(&msg_ids).unwrap_or_default();
     let mut tc_map = db.list_tool_calls_for_messages(&msg_ids).unwrap_or_default();
 
-    let mut approx_chars = sys_prompt_len;
+    let mut approx_chars = effective_sys_len;
     for m in &messages {
         approx_chars += m.content.len();
         if let Some(atts) = att_map.get(&m.id) {
@@ -111,6 +129,8 @@ pub(super) fn load_and_parse_page(
         .collect();
 
     Ok(LoadedPageData {
+        conversation,
+        granted_folders,
         items,
         has_more_pages,
         oldest_loaded_ts,

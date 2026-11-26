@@ -11,8 +11,8 @@ use gtk::{gdk, glib};
 use relm4::prelude::*;
 
 use crate::core::ThinkingLevel;
+use crate::core::prompt::default_system_prompt;
 use crate::i18n::{gettext, tr_f};
-use crate::storage::conversations::default_system_prompt;
 use crate::storage::{AttachmentRecord, ConversationFolder, Database, ModelRecord};
 use crate::ui::mention_picker::MentionPicker;
 

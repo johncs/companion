@@ -115,18 +115,18 @@ Currently `ModelRecord.default_params_json` is parsed ad-hoc with `serde_json::V
 **Goal:** Turn `src/storage/` into a pure, panic-free, transaction-safe persistence layer with zero business logic, zero filesystem scanning, and zero main-thread blocking calls.
 
 ### 2.1 Centralize Locking & Eliminate Mutex `.expect()` Calls
-- [ ] Add helper methods on `Database` in `src/storage/mod.rs`:
+- [x] Add helper methods on `Database` in `src/storage/mod.rs`:
   - `fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T>`
   - `fn with_tx<T>(&self, f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>) -> Result<T>`
-- [ ] Return a clean `anyhow::Error` if the mutex is ever poisoned instead of panicking.
-- [ ] Replace all **29** `.conn.lock().expect("database mutex poisoned")` calls across `storage/*.rs` with `self.with_conn(...)` / `self.with_tx(...)`.
+- [x] Return a clean `anyhow::Error` if the mutex is ever poisoned instead of panicking.
+- [x] Replace all **29** `.conn.lock().expect("database mutex poisoned")` calls across `storage/*.rs` with `self.with_conn(...)` / `self.with_tx(...)`.
 
 ### 2.2 Make Schema Migrations Atomic & Crash-Safe
-- [ ] Refactor `run_migrations` in `src/storage/schema.rs`:
+- [x] Refactor `run_migrations` in `src/storage/schema.rs`:
   - Represent migrations as an ordered slice `const MIGRATIONS: &[(i32, fn(&Transaction<'_>) -> Result<()>)]`.
   - Run **each** pending migration `(version, migrate_fn)` together with `PRAGMA user_version = <version>` inside its own SQLite transaction.
   - A failure on migration `N` rolls back cleanly to `N - 1` instead of leaving a half-migrated database.
-- [ ] Add **Migration v16**: create a proper `pending_downloads` table:
+- [x] Add **Migration v16**: create a proper `pending_downloads` table:
   ```sql
   CREATE TABLE IF NOT EXISTS pending_downloads (
       repo_id         TEXT NOT NULL,
@@ -141,29 +141,29 @@ Currently `ModelRecord.default_params_json` is parsed ad-hoc with `serde_json::V
   and migrate any existing JSON blob from `app_settings` (`key = 'pending_downloads'`) into the new table during v16.
 
 ### 2.3 Split `storage/models.rs` (549 lines) & Extract Business Logic
-- [ ] **Extract `src/storage/settings.rs`:**
+- [x] **Extract `src/storage/settings.rs`:**
   - Move `get_setting`, `set_setting`, `get/set_active_model_id`, `get/set_assistant_name`, `get/set_user_name`, `get/set_assistant_personality`, `get/set_custom_personality`, `get/set_user_about`, `get/set_web_search_global_enabled`, `get/set_search_engine`, and `get/set_searxng_url` into `src/storage/settings.rs`.
   - Add a grouped `PersonalizationSettings` snapshot struct (`db.get_personalization_settings()`) loaded in **one** transaction instead of 5 separate lock acquisitions on every chat turn.
-- [ ] **Extract `src/storage/downloads.rs`:**
+- [x] **Extract `src/storage/downloads.rs`:**
   - Move `list_pending_downloads`, `upsert_pending_download`, `update_pending_download_total`, and `remove_pending_download` to SQL queries against the new `pending_downloads` table (eliminating the read-modify-write lost-update race on the JSON blob).
-- [ ] **Move model disk sync out of `storage` → `src/models/registry.rs`:**
+- [x] **Move model disk sync out of `storage` → `src/models/registry.rs`:**
   - Move `register_local_gguf` and `sync_managed_models` out of `src/storage/models.rs` into `src/models/registry.rs` (`ModelRegistryService`).
   - `storage/models.rs` shrinks to pure SQL CRUD (`list_models`, `get_model`, `upsert_model`, `delete_model`, `record_model_speed`) with **zero** imports from `crate::models`.
-- [ ] **Move prompt composition out of `storage/conversations.rs` → `src/core/prompt.rs`:**
+- [x] **Move prompt composition out of `storage/conversations.rs` → `src/core/prompt.rs`:**
   - Move `CORE_SYSTEM_RULES`, `DEFAULT_SYSTEM_PROMPT`, `render_system_prompt`, and `compose_personalized_system_prompt` out of `src/storage/conversations.rs` into `src/core/prompt.rs`.
   - Extract `src/storage/folders.rs` for `conversation_folders` queries so `storage/conversations.rs` drops well below 350 lines.
 
 ### 2.4 Fix `duplicate_conversation` Data Loss & Async DB Access
-- [ ] Update `Database::duplicate_conversation` (`src/storage/conversations.rs`) to:
+- [x] Update `Database::duplicate_conversation` (`src/storage/conversations.rs`) to:
   - Copy `model_name`, `execution_device`, and `generation_ms` on duplicated messages (currently dropped).
   - Copy `attachments` and `tool_calls` mapped to each newly generated message ID inside the same transaction.
-- [ ] Audit and offload remaining synchronous SQLite calls on the GTK main thread (e.g., `LoadConversation` metadata load in `chat_view/mod.rs`, `insert_message_with_metrics` / `insert_tool_call` in `agent_runner.rs`) onto `core::runtime()` via `spawn_blocking`.
+- [x] Audit and offload remaining synchronous SQLite calls on the GTK main thread (e.g., `LoadConversation` metadata load in `chat_view/mod.rs`, `insert_message_with_metrics` / `insert_tool_call` in `agent_runner.rs`) onto `core::runtime()` via `spawn_blocking`.
 
 ### 2.5 Tests & Verification
-- [ ] Add migration unit tests: fresh DB → v16, upgrading from v15 with legacy `pending_downloads` JSON → v16, and rollback verification on a simulated failed migration.
-- [ ] Add unit tests for `duplicate_conversation` asserting message metrics, attachments, tool calls, and folders are all preserved.
-- [ ] Add unit tests for `storage/downloads.rs` concurrent upserts/updates/deletes.
-- [ ] **Verification:** `src/storage/` has zero imports from `crate::agent` or `crate::models`, zero `.expect()` calls, and every file in `src/storage/` is `<= 350` lines. `cargo test` passes.
+- [x] Add migration unit tests: fresh DB → v16, upgrading from v15 with legacy `pending_downloads` JSON → v16, and rollback verification on a simulated failed migration.
+- [x] Add unit tests for `duplicate_conversation` asserting message metrics, attachments, tool calls, and folders are all preserved.
+- [x] Add unit tests for `storage/downloads.rs` concurrent upserts/updates/deletes.
+- [x] **Verification:** `src/storage/` has zero imports from `crate::agent` or `crate::models`, zero `.expect()` calls, and every file in `src/storage/` is `<= 350` lines. `cargo test` passes.
 
 ---
 
@@ -408,7 +408,7 @@ Eliminate `Rc<RefCell<Option<Rc<dyn Fn()>>>>` callback slots and 8–12 paramete
 | Sprint | Focus Area | Status | Key Outcome |
 |---|---|---|---|
 | **Sprint 1** | Pure Domain Types & Zero-GTK Core | `[x]` Done | Zero `glib` in domain layers; typed `ModelParams` & enums |
-| **Sprint 2** | Storage Hardening & Responsibility Split | `[ ]` Planned | Atomic migrations, zero DB `.expect()`, pure SQL repos |
+| **Sprint 2** | Storage Hardening & Responsibility Split | `[x]` Done | Atomic migrations, zero DB `.expect()`, pure SQL repos |
 | **Sprint 3** | `ToolRegistry` & Security Fixes | `[ ]` Planned | Extensible tool system; SSRF & write-escalation bugs fixed |
 | **Sprint 4** | Extract `AgentRunner` from `chat_view` | `[ ]` Planned | Full headless agent loop tests; thin Relm4 chat renderer |
 | **Sprint 5** | `DownloadManager` & UI Cleanup | `[ ]` Planned | Zero `too_many_arguments`; injectable downloads; all UI files `<= 400` LOC |

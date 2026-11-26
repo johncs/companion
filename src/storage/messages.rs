@@ -29,29 +29,30 @@ impl Database {
             created_at: now,
         };
 
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                msg.id,
-                msg.conversation_id,
-                msg.role.as_str(),
-                msg.content,
-                msg.reasoning_content,
-                msg.thinking_level.map(ThinkingLevel::as_str),
-                msg.model_name,
-                msg.execution_device.map(ExecutionDevice::as_str),
-                msg.token_count,
-                msg.generation_ms,
-                msg.created_at,
-            ],
-        )?;
-        conn.execute(
-            "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-            params![now, new.conversation_id],
-        )?;
-        Ok(msg)
+        self.with_tx(|tx| {
+            tx.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    msg.id,
+                    msg.conversation_id,
+                    msg.role.as_str(),
+                    msg.content,
+                    msg.reasoning_content,
+                    msg.thinking_level.map(ThinkingLevel::as_str),
+                    msg.model_name,
+                    msg.execution_device.map(ExecutionDevice::as_str),
+                    msg.token_count,
+                    msg.generation_ms,
+                    msg.created_at,
+                ],
+            )?;
+            tx.execute(
+                "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+                params![now, new.conversation_id],
+            )?;
+            Ok(msg)
+        })
     }
 
     /// Fetch the most recent `limit` messages (optionally before `before_created_at`) in chronological order.
@@ -62,31 +63,33 @@ impl Database {
         before_created_at: Option<i64>,
         limit: usize,
     ) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        let mut items = if let Some(cursor) = before_created_at {
-            let mut stmt = conn.prepare(
-                "SELECT id, conversation_id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at
-                 FROM messages
-                 WHERE conversation_id = ?1 AND created_at < ?2
-                 ORDER BY created_at DESC, rowid DESC
-                 LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(params![conversation_id, cursor, limit as i64], map_message)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            let mut stmt = conn.prepare(
-                "SELECT id, conversation_id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at
-                 FROM messages
-                 WHERE conversation_id = ?1
-                 ORDER BY created_at DESC, rowid DESC
-                 LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![conversation_id, limit as i64], map_message)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        self.with_conn(|conn| {
+            let mut items = if let Some(cursor) = before_created_at {
+                let mut stmt = conn.prepare(
+                    "SELECT id, conversation_id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at
+                     FROM messages
+                     WHERE conversation_id = ?1 AND created_at < ?2
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?3",
+                )?;
+                let rows =
+                    stmt.query_map(params![conversation_id, cursor, limit as i64], map_message)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, conversation_id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at
+                     FROM messages
+                     WHERE conversation_id = ?1
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![conversation_id, limit as i64], map_message)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
 
-        items.reverse();
-        Ok(items)
+            items.reverse();
+            Ok(items)
+        })
     }
 
     /// Update a user message's content and delete all messages in the conversation after it.
@@ -98,27 +101,26 @@ impl Database {
         new_content: &str,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let mut conn = self.conn.lock().expect("database mutex poisoned");
-        let tx = conn.transaction()?;
-        tx.execute(
-            "UPDATE messages SET content = ?1 WHERE id = ?2 AND conversation_id = ?3",
-            params![new_content, message_id, conversation_id],
-        )?;
-        tx.execute(
-            "DELETE FROM messages
-             WHERE conversation_id = ?1
-               AND (
-                   created_at > ?2
-                   OR (created_at = ?2 AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ?3), 0))
-               )",
-            params![conversation_id, created_at, message_id],
-        )?;
-        tx.execute(
-            "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-            params![now, conversation_id],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.with_tx(|tx| {
+            tx.execute(
+                "UPDATE messages SET content = ?1 WHERE id = ?2 AND conversation_id = ?3",
+                params![new_content, message_id, conversation_id],
+            )?;
+            tx.execute(
+                "DELETE FROM messages
+                 WHERE conversation_id = ?1
+                   AND (
+                       created_at > ?2
+                       OR (created_at = ?2 AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ?3), 0))
+                   )",
+                params![conversation_id, created_at, message_id],
+            )?;
+            tx.execute(
+                "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+                params![now, conversation_id],
+            )?;
+            Ok(())
+        })
     }
 
     /// Delete a message and all messages in the conversation after it.
@@ -129,23 +131,22 @@ impl Database {
         created_at: i64,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        let mut conn = self.conn.lock().expect("database mutex poisoned");
-        let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM messages
-             WHERE conversation_id = ?1
-               AND (
-                   created_at > ?2
-                   OR (created_at = ?2 AND rowid >= COALESCE((SELECT rowid FROM messages WHERE id = ?3), 0))
-               )",
-            params![conversation_id, created_at, message_id],
-        )?;
-        tx.execute(
-            "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-            params![now, conversation_id],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.with_tx(|tx| {
+            tx.execute(
+                "DELETE FROM messages
+                 WHERE conversation_id = ?1
+                   AND (
+                       created_at > ?2
+                       OR (created_at = ?2 AND rowid >= COALESCE((SELECT rowid FROM messages WHERE id = ?3), 0))
+                   )",
+                params![conversation_id, created_at, message_id],
+            )?;
+            tx.execute(
+                "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+                params![now, conversation_id],
+            )?;
+            Ok(())
+        })
     }
 }
 

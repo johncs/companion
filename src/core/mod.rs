@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod markdown;
 pub mod model_params;
 pub mod paths;
+pub mod prompt;
 pub mod types;
 
 use std::sync::LazyLock;

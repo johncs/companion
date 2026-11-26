@@ -3,10 +3,13 @@
 pub mod agent;
 pub mod attachments;
 pub mod conversations;
+pub mod downloads;
 pub mod entities;
+pub mod folders;
 pub mod messages;
 pub mod models;
 pub mod schema;
+pub mod settings;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -35,7 +38,7 @@ impl Database {
                 .with_context(|| format!("Failed to create database directory {:?}", parent))?;
         }
 
-        let conn = Connection::open(&db_path)
+        let mut conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open SQLite database {:?}", db_path))?;
 
         conn.execute_batch(
@@ -47,7 +50,7 @@ impl Database {
             ",
         )?;
 
-        schema::run_migrations(&conn)?;
+        schema::run_migrations(&mut conn)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -58,9 +61,9 @@ impl Database {
     /// Open an isolated in-memory database for unit tests.
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
+        let mut conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        schema::run_migrations(&conn)?;
+        schema::run_migrations(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             db_path: PathBuf::from(":memory:"),
@@ -70,6 +73,30 @@ impl Database {
     /// Return the filesystem path of the active database.
     pub fn path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Execute a closure while holding the database mutex.
+    pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let guard = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database mutex poisoned"))?;
+        f(&guard)
+    }
+
+    /// Execute a closure inside an atomic SQLite transaction while holding the database mutex.
+    pub fn with_tx<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let mut guard = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database mutex poisoned"))?;
+        let tx = guard.transaction()?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
     }
 }
 
@@ -325,9 +352,69 @@ mod tests {
         let f_rw = db.add_conversation_folder(&conv.id, "/tmp/rw_dir").unwrap();
         db.set_conversation_folder_permission(&f_rw.id, FolderPermission::ReadWrite)
             .unwrap();
+
+        let att_msg = db
+            .insert_message(NewMessage {
+                conversation_id: &conv.id,
+                role: crate::core::types::MessageRole::Assistant,
+                content: "Checked file",
+                reasoning_content: Some("Thinking..."),
+                thinking_level: Some(ThinkingLevel::High),
+                model_name: Some("Gemma 4"),
+                execution_device: Some(crate::core::types::ExecutionDevice::Gpu),
+                token_count: 42,
+                generation_ms: Some(1250),
+            })
+            .unwrap();
+        db.insert_attachments(
+            &att_msg.id,
+            &[AttachmentRecord {
+                id: "att-dup-1".to_string(),
+                message_id: att_msg.id.clone(),
+                file_name: "notes.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                file_path: "/tmp/notes.txt".to_string(),
+                extracted_text: Some("hello".to_string()),
+                byte_size: 5,
+            }],
+        )
+        .unwrap();
+        db.insert_tool_call(&ToolCallRecord {
+            id: "tc-dup-1".to_string(),
+            message_id: att_msg.id.clone(),
+            tool_name: "read_file".to_string(),
+            arguments_json: r#"{"path":"notes.txt"}"#.to_string(),
+            status: crate::core::types::ToolCallStatus::Ok,
+            output: Some("hello".to_string()),
+            permission_decision: crate::core::types::PermissionDecision::AllowOnce,
+            created_at: 1000,
+        })
+        .unwrap();
+
         let dup = db.duplicate_conversation(&conv.id).unwrap().unwrap();
         assert_eq!(dup.system_prompt.as_deref(), Some("Custom notes"));
         assert_eq!(dup.thinking_level, ThinkingLevel::High);
+
+        let dup_msgs = db.list_messages_page(&dup.id, None, 20).unwrap();
+        assert_eq!(dup_msgs.len(), 3);
+        let dup_last = dup_msgs.last().unwrap();
+        assert_ne!(dup_last.id, att_msg.id);
+        assert_eq!(dup_last.model_name.as_deref(), Some("Gemma 4"));
+        assert_eq!(
+            dup_last.execution_device,
+            Some(crate::core::types::ExecutionDevice::Gpu)
+        );
+        assert_eq!(dup_last.generation_ms, Some(1250));
+
+        let dup_atts = db
+            .list_attachments_for_messages(&[dup_last.id.as_str()])
+            .unwrap();
+        assert_eq!(dup_atts.get(&dup_last.id).map(Vec::len), Some(1));
+        let dup_tcs = db
+            .list_tool_calls_for_messages(&[dup_last.id.as_str()])
+            .unwrap();
+        assert_eq!(dup_tcs.get(&dup_last.id).map(Vec::len), Some(1));
+
         let dup_folders = db.list_conversation_folders(&dup.id).unwrap();
         assert_eq!(dup_folders.len(), 2);
         assert_eq!(dup_folders[0].folder_path, f_ro.folder_path);
@@ -370,21 +457,21 @@ mod tests {
 
     #[test]
     fn render_system_prompt_substitutes_placeholders_and_legacy_prefix() {
-        let rendered = crate::storage::conversations::render_system_prompt(
+        let rendered = crate::core::prompt::render_system_prompt(
             "You are {assistant_name}, helping {user_name}.",
             "Emma",
             Some("Joe"),
         );
         assert_eq!(rendered, "You are Emma, helping Joe.");
 
-        let legacy = crate::storage::conversations::render_system_prompt(
+        let legacy = crate::core::prompt::render_system_prompt(
             "You are Companion, a helpful assistant.",
             "Emma",
             None,
         );
         assert_eq!(legacy, "You are Emma, a helpful assistant.");
 
-        let composed = crate::storage::conversations::compose_personalized_system_prompt(
+        let composed = crate::core::prompt::compose_personalized_system_prompt(
             "Reply in Greek.",
             "Emma",
             Some("Joe"),
@@ -392,12 +479,12 @@ mod tests {
             None,
             None,
         );
-        assert!(composed.starts_with(crate::storage::conversations::CORE_SYSTEM_RULES));
+        assert!(composed.starts_with(crate::core::prompt::CORE_SYSTEM_RULES));
         assert!(composed.contains("Your name is Emma."));
         assert!(composed.contains("The user's name is Joe."));
         assert!(composed.ends_with("Reply in Greek."));
 
-        let custom = crate::storage::conversations::compose_personalized_system_prompt(
+        let custom = crate::core::prompt::compose_personalized_system_prompt(
             "",
             "Emma",
             Some("Joe"),
@@ -406,5 +493,21 @@ mod tests {
             None,
         );
         assert!(custom.contains("You are Emma, a concise Rust mentor for Joe."));
+    }
+
+    #[test]
+    fn with_tx_rolls_back_on_error() {
+        let db = Database::open_in_memory().expect("open in-memory db");
+        let err = db
+            .with_tx(|tx| -> Result<()> {
+                tx.execute(
+                    "INSERT INTO app_settings (key, value) VALUES ('tx_test', 'val')",
+                    [],
+                )?;
+                anyhow::bail!("abort tx")
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("abort tx"));
+        assert_eq!(db.get_setting("tx_test").unwrap(), None);
     }
 }

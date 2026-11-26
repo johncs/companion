@@ -6,8 +6,8 @@ use adw::prelude::*;
 
 use crate::agent::{WEB_SEARCH_TOOL_INSTRUCTIONS, WORKSPACE_TOOLS_INSTRUCTIONS};
 use crate::core::attachments::format_attachments_for_prompt;
+use crate::core::prompt::compose_personalized_system_prompt;
 use crate::inference::provider::{ChatRole, ChatTurn};
-use crate::storage::conversations::compose_personalized_system_prompt;
 use crate::ui::message_object::MessageObject;
 
 use super::ChatViewModel;
@@ -17,10 +17,11 @@ impl ChatViewModel {
     pub(super) fn build_prompt_turns(&self) -> Vec<ChatTurn> {
         let mut turns = Vec::new();
         let assistant = self.assistant_name.borrow().clone();
-        let user_name = self.db.get_user_name().ok().flatten();
-        let personality = self.db.get_assistant_personality().unwrap_or_default();
-        let custom_personality = self.db.get_custom_personality().ok().flatten();
-        let user_about = self.db.get_user_about().ok().flatten();
+        let prefs = self.db.get_personalization_settings().ok();
+        let (user_name, personality, custom_personality, user_about) = match prefs {
+            Some(p) => (p.user_name, p.personality, p.custom_personality, p.user_about),
+            None => (None, Default::default(), None, None),
+        };
         let mut sys_prompt = compose_personalized_system_prompt(
             &self.active_system_prompt,
             &assistant,

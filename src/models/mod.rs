@@ -3,6 +3,7 @@
 pub mod gguf;
 pub mod hardware;
 pub mod huggingface;
+pub mod registry;
 
 use std::path::{Path, PathBuf};
 

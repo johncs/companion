@@ -13,22 +13,23 @@ use super::entities::ToolCallRecord;
 impl Database {
     /// Persist a tool call record linked to `message_id`.
     pub fn insert_tool_call(&self, tc: &ToolCallRecord) -> Result<()> {
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        conn.execute(
-            "INSERT INTO tool_calls (id, message_id, tool_name, arguments_json, status, output, permission_decision, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                tc.id,
-                tc.message_id,
-                tc.tool_name,
-                tc.arguments_json,
-                tc.status.as_str(),
-                tc.output,
-                tc.permission_decision.as_str(),
-                tc.created_at,
-            ],
-        )?;
-        Ok(())
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO tool_calls (id, message_id, tool_name, arguments_json, status, output, permission_decision, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    tc.id,
+                    tc.message_id,
+                    tc.tool_name,
+                    tc.arguments_json,
+                    tc.status.as_str(),
+                    tc.output,
+                    tc.permission_decision.as_str(),
+                    tc.created_at,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Batch-fetch tool calls for many `message_ids` in one query (avoids N+1 queries).
@@ -49,14 +50,15 @@ impl Database {
              ORDER BY created_at ASC"
         );
 
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(message_ids.iter()), map_tool_call)?;
-        for row in rows {
-            let tc = row?;
-            map.entry(tc.message_id.clone()).or_default().push(tc);
-        }
-        Ok(map)
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(message_ids.iter()), map_tool_call)?;
+            for row in rows {
+                let tc = row?;
+                map.entry(tc.message_id.clone()).or_default().push(tc);
+            }
+            Ok(map)
+        })
     }
 }
 
