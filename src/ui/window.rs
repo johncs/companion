@@ -5,6 +5,7 @@ use relm4::prelude::*;
 
 use crate::core::paths::AppPaths;
 use crate::i18n::gettext;
+use crate::models::download_manager::DownloadManager;
 use crate::storage::{Conversation, Database, ModelRecord};
 use crate::ui::chat_view::{ChatViewModel, ChatViewMsg, ChatViewOutput};
 use crate::ui::preferences::present_settings_dialog;
@@ -13,6 +14,7 @@ use crate::ui::sidebar::{SidebarModel, SidebarMsg, SidebarOutput};
 pub struct MainWindow {
     db: Database,
     paths: AppPaths,
+    download_manager: DownloadManager,
     sidebar: Controller<SidebarModel>,
     chat_view: Controller<ChatViewModel>,
     active_conversation: Option<Conversation>,
@@ -197,9 +199,11 @@ impl SimpleComponent for MainWindow {
         let toast_overlay = adw::ToastOverlay::new();
         let split_view = adw::NavigationSplitView::new();
 
+        let download_manager = DownloadManager::new(db.clone(), paths.models_dir.clone());
         let model = Self {
             db,
             paths,
+            download_manager,
             sidebar,
             chat_view,
             active_conversation: None,
@@ -292,6 +296,7 @@ impl MainWindow {
             &self.toast_overlay,
             self.db.clone(),
             self.paths.models_dir.clone(),
+            self.download_manager.clone(),
             active_id,
             initial_page,
             move |new_id| {

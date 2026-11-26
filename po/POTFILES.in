@@ -16,6 +16,7 @@ src/ui/chat_controls_dialog.rs
 src/ui/chat_view/agent_runner.rs
 src/ui/chat_view/message_actions.rs
 src/ui/chat_view/mod.rs
+src/ui/composer/actions.rs
 src/ui/composer/attachments.rs
 src/ui/composer/input_helpers.rs
 src/ui/composer/mod.rs
@@ -23,12 +24,12 @@ src/ui/composer/toolbar.rs
 src/ui/folder_permissions_dialog.rs
 src/ui/hf_browser/download_controls.rs
 src/ui/hf_browser/download_tracker.rs
-src/ui/hf_browser/download_worker.rs
 src/ui/hf_browser/mod.rs
 src/ui/hf_browser/repo_rows.rs
 src/ui/hf_browser/starter_models.rs
 src/ui/icons.rs
-src/ui/message_dialogs.rs
+src/ui/message_dialogs/edit_dialog.rs
+src/ui/message_dialogs/info_dialog.rs
 src/ui/message_object.rs
 src/ui/message_row/bind.rs
 src/ui/message_row/blocks.rs
@@ -44,6 +45,7 @@ src/ui/preferences/personalization_group.rs
 src/ui/preferences/storage_stats.rs
 src/ui/preferences/tools_group.rs
 src/ui/preferences/web_search_group.rs
-src/ui/sidebar.rs
+src/ui/sidebar/mod.rs
+src/ui/sidebar/widgets.rs
 src/ui/sidebar_rows.rs
 src/ui/window.rs

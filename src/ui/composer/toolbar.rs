@@ -8,7 +8,7 @@ use relm4::prelude::*;
 use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
 use crate::models::friendly_model_name;
-use crate::ui::chat_controls_dialog::present_chat_controls_dialog;
+use crate::ui::chat_controls_dialog::{ChatControlsConfig, present_chat_controls_dialog};
 use crate::ui::icons;
 
 use super::input_helpers::{compute_context_usage_pct, extract_model_n_ctx};
@@ -170,21 +170,23 @@ impl ComposerModel {
         let sender_manage = sender.clone();
         present_chat_controls_dialog(
             &self.controls_btn,
-            active_model,
-            &self.assistant_name,
-            self.thinking_level,
-            current_ctx,
-            self.context_used_tokens,
-            &self.system_prompt,
-            move |thinking_level, context_length, system_prompt| {
-                sender_apply.input(ComposerMsg::ControlsApplied {
-                    thinking_level,
-                    system_prompt,
-                    context_length,
-                });
-            },
-            move || {
-                sender_manage.input(ComposerMsg::OpenModelSettings);
+            ChatControlsConfig {
+                active_model,
+                assistant_name: &self.assistant_name,
+                current_thinking: self.thinking_level,
+                current_ctx,
+                used_tokens: self.context_used_tokens,
+                current_prompt: &self.system_prompt,
+                on_apply: move |thinking_level, context_length, system_prompt| {
+                    sender_apply.input(ComposerMsg::ControlsApplied {
+                        thinking_level,
+                        system_prompt,
+                        context_length,
+                    });
+                },
+                on_manage_models: move || {
+                    sender_manage.input(ComposerMsg::OpenModelSettings);
+                },
             },
         );
     }

@@ -1,5 +1,6 @@
 //! Local model discovery, hardware capability probing, and Hugging Face GGUF downloads.
 
+pub mod download_manager;
 pub mod gguf;
 pub mod hardware;
 pub mod huggingface;

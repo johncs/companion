@@ -11,6 +11,14 @@ use crate::i18n::{gettext, tr_f};
 use crate::storage::{ConversationFolder, Database};
 use crate::ui::widgets::{clear_preferences_group, dialog_content_box};
 
+#[derive(Clone)]
+struct FolderPermissionsState {
+    db: Database,
+    toast_overlay: adw::ToastOverlay,
+    on_changed: Rc<dyn Fn()>,
+    refresh_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+}
+
 /// Present the Access Manager dialog for `conv_id`.
 pub fn present_folder_permissions_dialog(
     parent: &impl IsA<gtk::Widget>,
@@ -55,39 +63,31 @@ pub fn present_folder_permissions_dialog(
     toast_overlay.set_child(Some(&toolbar));
     dialog.set_child(Some(&toast_overlay));
 
-    let on_changed_rc: Rc<dyn Fn()> = Rc::new(on_changed);
-    let refresh_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let state = FolderPermissionsState {
+        db: db.clone(),
+        toast_overlay: toast_overlay.clone(),
+        on_changed: Rc::new(on_changed),
+        refresh_slot: Rc::new(RefCell::new(None)),
+    };
 
     let refresh_fn: Rc<dyn Fn()> = {
-        let db = db.clone();
+        let state = state.clone();
         let conv_id = conv_id.clone();
         let dirs_group = dirs_group.clone();
         let files_group = files_group.clone();
-        let toast_overlay = toast_overlay.clone();
-        let on_changed = on_changed_rc.clone();
-        let refresh_slot = refresh_slot.clone();
-
         Rc::new(move || {
-            let entries = db.list_conversation_folders(&conv_id).unwrap_or_default();
+            let entries = state.db.list_conversation_folders(&conv_id).unwrap_or_default();
             let (file_entries, dir_entries): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| {
                 let p = Path::new(&e.folder_path);
-                if p.exists() {
-                    p.is_file()
-                } else {
-                    p.extension().is_some()
-                }
+                if p.exists() { p.is_file() } else { p.extension().is_some() }
             });
-
             populate_grant_group(
                 &dirs_group,
                 &dir_entries,
                 false,
                 &gettext("No folders granted"),
                 &gettext("Click + to grant access to a folder"),
-                &db,
-                &toast_overlay,
-                &on_changed,
-                &refresh_slot,
+                &state,
             );
             populate_grant_group(
                 &files_group,
@@ -95,30 +95,25 @@ pub fn present_folder_permissions_dialog(
                 true,
                 &gettext("No files granted"),
                 &gettext("Click + to grant access to a file"),
-                &db,
-                &toast_overlay,
-                &on_changed,
-                &refresh_slot,
+                &state,
             );
         })
     };
 
-    *refresh_slot.borrow_mut() = Some(refresh_fn.clone());
+    *state.refresh_slot.borrow_mut() = Some(refresh_fn.clone());
     refresh_fn();
 
     let grant_chosen_path = Rc::new({
-        let db = db.clone();
+        let state = state.clone();
         let conv_id = conv_id.clone();
-        let toast_overlay = toast_overlay.clone();
-        let on_changed = on_changed_rc;
         let refresh_fn = refresh_fn.clone();
         move |res: Result<gio::File, glib::Error>| {
             if let Ok(file) = res
                 && let Some(path) = file.path()
             {
-                let existing = db.list_conversation_folders(&conv_id).unwrap_or_default();
+                let existing = state.db.list_conversation_folders(&conv_id).unwrap_or_default();
                 if let Some(parent_name) = find_covering_granted_folder(&existing, &path) {
-                    toast_overlay.add_toast(adw::Toast::new(&tr_f(
+                    state.toast_overlay.add_toast(adw::Toast::new(&tr_f(
                         "Already covered by granted folder \"{name}\"",
                         &[("name", &parent_name)],
                     )));
@@ -128,13 +123,13 @@ pub fn present_folder_permissions_dialog(
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
-                if let Err(err) = db.add_conversation_folder(&conv_id, &path_str) {
-                    toast_overlay.add_toast(adw::Toast::new(&tr_f(
+                if let Err(err) = state.db.add_conversation_folder(&conv_id, &path_str) {
+                    state.toast_overlay.add_toast(adw::Toast::new(&tr_f(
                         "Failed to grant access: {err}",
                         &[("err", &err.to_string())],
                     )));
                 } else {
-                    on_changed();
+                    (state.on_changed)();
                     refresh_fn();
                 }
             }
@@ -186,17 +181,13 @@ fn build_add_button(tooltip: &str) -> gtk::Button {
         .build()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn populate_grant_group(
     group: &adw::PreferencesGroup,
     entries: &[ConversationFolder],
     is_file_group: bool,
     empty_title: &str,
     empty_subtitle: &str,
-    db: &Database,
-    toast_overlay: &adw::ToastOverlay,
-    on_changed: &Rc<dyn Fn()>,
-    refresh_slot: &Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    state: &FolderPermissionsState,
 ) {
     clear_preferences_group(group);
     if entries.is_empty() {
@@ -210,97 +201,92 @@ fn populate_grant_group(
     }
 
     for entry in entries {
-        let path_obj = Path::new(&entry.folder_path);
-        let name = path_obj
-            .file_name()
-            .and_then(|n| n.to_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&entry.folder_path);
-        let exists = path_obj.exists();
-        let subtitle = if exists {
-            entry.folder_path.clone()
-        } else {
-            tr_f("{path} (Missing)", &[("path", &entry.folder_path)])
-        };
-
-        let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(name))
-            .subtitle(glib::markup_escape_text(&subtitle))
-            .build();
-        row.add_prefix(&gtk::Image::from_icon_name(if is_file_group {
-            "text-x-generic-symbolic"
-        } else {
-            "folder-symbolic"
-        }));
-
-        let perm_model = gtk::StringList::new(&[
-            &gettext("Read Only"),
-            &gettext("Read & Write"),
-        ]);
-        let perm_dropdown = gtk::DropDown::builder()
-            .model(&perm_model)
-            .selected(if entry.permission_mode.allows_write() {
-                1
-            } else {
-                0
-            })
-            .valign(gtk::Align::Center)
-            .tooltip_text(gettext("Permission level"))
-            .build();
-        {
-            let db = db.clone();
-            let fid = entry.id.clone();
-            let toast_overlay = toast_overlay.clone();
-            let on_changed = on_changed.clone();
-            perm_dropdown.connect_selected_notify(move |dd| {
-                let mode = if dd.selected() == 1 {
-                    crate::core::types::FolderPermission::ReadWrite
-                } else {
-                    crate::core::types::FolderPermission::Read
-                };
-                if let Err(err) = db.set_conversation_folder_permission(&fid, mode) {
-                    toast_overlay.add_toast(adw::Toast::new(&tr_f(
-                        "Failed to update permission: {err}",
-                        &[("err", &err.to_string())],
-                    )));
-                } else {
-                    on_changed();
-                }
-            });
-        }
-
-        let revoke_btn = gtk::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .tooltip_text(gettext("Revoke access"))
-            .valign(gtk::Align::Center)
-            .css_classes(["flat", "circular"])
-            .build();
-        {
-            let db = db.clone();
-            let fid = entry.id.clone();
-            let toast_overlay = toast_overlay.clone();
-            let on_changed = on_changed.clone();
-            let refresh_slot = refresh_slot.clone();
-            revoke_btn.connect_clicked(move |_| {
-                if let Err(err) = db.remove_conversation_folder(&fid) {
-                    toast_overlay.add_toast(adw::Toast::new(&tr_f(
-                        "Failed to revoke access: {err}",
-                        &[("err", &err.to_string())],
-                    )));
-                } else {
-                    on_changed();
-                    if let Some(rf) = refresh_slot.borrow().as_ref() {
-                        rf();
-                    }
-                }
-            });
-        }
-
-        row.add_suffix(&perm_dropdown);
-        row.add_suffix(&build_open_path_button(&entry.folder_path, toast_overlay));
-        row.add_suffix(&revoke_btn);
-        group.add(&row);
+        group.add(&build_grant_row(entry, is_file_group, state));
     }
+}
+
+fn build_grant_row(
+    entry: &ConversationFolder,
+    is_file_group: bool,
+    state: &FolderPermissionsState,
+) -> adw::ActionRow {
+    let path_obj = Path::new(&entry.folder_path);
+    let name = path_obj
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&entry.folder_path);
+    let subtitle = if path_obj.exists() {
+        entry.folder_path.clone()
+    } else {
+        tr_f("{path} (Missing)", &[("path", &entry.folder_path)])
+    };
+
+    let row = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(name))
+        .subtitle(glib::markup_escape_text(&subtitle))
+        .build();
+    row.add_prefix(&gtk::Image::from_icon_name(if is_file_group {
+        "text-x-generic-symbolic"
+    } else {
+        "folder-symbolic"
+    }));
+
+    let perm_model = gtk::StringList::new(&[&gettext("Read Only"), &gettext("Read & Write")]);
+    let perm_dropdown = gtk::DropDown::builder()
+        .model(&perm_model)
+        .selected(if entry.permission_mode.allows_write() { 1 } else { 0 })
+        .valign(gtk::Align::Center)
+        .tooltip_text(gettext("Permission level"))
+        .build();
+    {
+        let state = state.clone();
+        let fid = entry.id.clone();
+        perm_dropdown.connect_selected_notify(move |dd| {
+            let mode = if dd.selected() == 1 {
+                crate::core::types::FolderPermission::ReadWrite
+            } else {
+                crate::core::types::FolderPermission::Read
+            };
+            if let Err(err) = state.db.set_conversation_folder_permission(&fid, mode) {
+                state.toast_overlay.add_toast(adw::Toast::new(&tr_f(
+                    "Failed to update permission: {err}",
+                    &[("err", &err.to_string())],
+                )));
+            } else {
+                (state.on_changed)();
+            }
+        });
+    }
+
+    let revoke_btn = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text(gettext("Revoke access"))
+        .valign(gtk::Align::Center)
+        .css_classes(["flat", "circular"])
+        .build();
+    {
+        let state = state.clone();
+        let fid = entry.id.clone();
+        revoke_btn.connect_clicked(move |_| {
+            if let Err(err) = state.db.remove_conversation_folder(&fid) {
+                state.toast_overlay.add_toast(adw::Toast::new(&tr_f(
+                    "Failed to revoke access: {err}",
+                    &[("err", &err.to_string())],
+                )));
+            } else {
+                (state.on_changed)();
+                if let Some(rf) = state.refresh_slot.borrow().as_ref() {
+                    rf();
+                }
+            }
+        });
+    }
+
+    row.add_suffix(&perm_dropdown);
+    row.add_suffix(&build_open_path_button(&entry.folder_path, &state.toast_overlay));
+    row.add_suffix(&revoke_btn);
+    row
 }
 
 fn build_open_path_button(path: &str, toast_overlay: &adw::ToastOverlay) -> gtk::Button {

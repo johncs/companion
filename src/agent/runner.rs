@@ -161,12 +161,14 @@ impl AgentRunner {
 
         self.finalize_run(
             &cfg,
-            started,
-            full_answer,
-            full_reasoning,
-            recorded_tools,
-            total_completion_tokens,
-            total_decode_ms,
+            FinalizeRunArgs {
+                started,
+                full_answer,
+                full_reasoning,
+                recorded_tools,
+                total_completion_tokens,
+                total_decode_ms,
+            },
             &tx,
         )
         .await;
@@ -596,18 +598,20 @@ impl AgentRunner {
         (rec, output)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn finalize_run(
         &self,
         cfg: &AgentRunConfig,
-        started: Instant,
-        full_answer: String,
-        full_reasoning: String,
-        recorded_tools: Vec<ToolCallRecord>,
-        total_completion_tokens: i64,
-        total_decode_ms: i64,
+        args: FinalizeRunArgs,
         tx: &mpsc::UnboundedSender<AgentEvent>,
     ) {
+        let FinalizeRunArgs {
+            started,
+            full_answer,
+            full_reasoning,
+            recorded_tools,
+            total_completion_tokens,
+            total_decode_ms,
+        } = args;
         let was_cancelled = cfg.cancel_flag.load(Ordering::Relaxed);
         let is_empty = full_answer.trim().is_empty()
             && full_reasoning.trim().is_empty()
@@ -683,6 +687,15 @@ impl AgentRunner {
             let _ = tx.send(AgentEvent::TitleUpdated(new_title));
         }
     }
+}
+
+struct FinalizeRunArgs {
+    started: Instant,
+    full_answer: String,
+    full_reasoning: String,
+    recorded_tools: Vec<ToolCallRecord>,
+    total_completion_tokens: i64,
+    total_decode_ms: i64,
 }
 
 struct StepOutput {

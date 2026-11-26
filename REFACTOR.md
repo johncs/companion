@@ -310,7 +310,7 @@ Currently, adding or modifying a tool requires editing 6 different `match tool_n
 ### 5.1 Extract `DownloadManager` into `src/models/download_manager.rs`
 Currently download state, workers, and cancellation live inside `src/ui/hf_browser/` (`download_state.rs`, `download_worker.rs`, `download_tracker.rs`) and rely on a global `static ACTIVE_DOWNLOADS: LazyLock<Mutex<...>>`.
 
-- [ ] Create `src/models/download_manager.rs` defining an injectable, cloneable `DownloadManager`:
+- [x] Create `src/models/download_manager.rs` defining an injectable, cloneable `DownloadManager`:
   - Owns `active: Arc<Mutex<HashMap<DownloadKey, Arc<Mutex<ActiveDownloadEntry>>>>>`, `db: Database`, `models_dir: PathBuf`, and a pluggable `Fetcher` trait (defaulting to Hugging Face `download_gguf_file`, stubbable in tests).
   - Clean public API:
     - `start_download(&self, req: DownloadRequest) -> DownloadHandle`
@@ -320,30 +320,30 @@ Currently download state, workers, and cancellation live inside `src/ui/hf_brows
     - `restore_pending(&self) -> Vec<DownloadHandle>`
     - `subscribe(&self, key: &DownloadKey) -> Option<broadcast::Receiver<DownloadSnapshot>>`
     - `active_downloads(&self) -> Vec<DownloadSummary>`
-- [ ] Unify `mmproj` vision downloads (`ui/model_manager/vision_download.rs`, **312 lines**) to use `DownloadManager` instead of duplicating progress/pause/cancel/part-file wiring!
-- [ ] Pass `DownloadManager` from `MainWindow` into `present_settings_dialog` → `model_manager` / `hf_browser`.
-- [ ] Delete global `ACTIVE_DOWNLOADS` static and `ui/hf_browser/download_worker.rs`.
+- [x] Unify `mmproj` vision downloads (`ui/model_manager/vision_download.rs`, **312 lines**) to use `DownloadManager` instead of duplicating progress/pause/cancel/part-file wiring!
+- [x] Pass `DownloadManager` from `MainWindow` into `present_settings_dialog` → `model_manager` / `hf_browser`.
+- [x] Delete global `ACTIVE_DOWNLOADS` static and `ui/hf_browser/download_worker.rs`.
 
 ### 5.2 Refactor Imperative UI Builders into Cohesive Structs / Relm4 Components
 Eliminate `Rc<RefCell<Option<Rc<dyn Fn()>>>>` callback slots and 8–12 parameter functions:
-- [ ] **`src/ui/model_manager/`:**
+- [x] **`src/ui/model_manager/`:**
   - Replace `build_models_page` (294 lines) and `build_refresh_installed_callback` (136 lines) in `model_manager/mod.rs` (537 lines) with a `ModelManagerView` struct (or Relm4 component) holding its widgets, `db`, `download_manager`, `hw`, and state fields — removing 6 `#[allow(clippy::too_many_arguments)]` annotations across `mod.rs`, `active_details.rs`, `vision_setup.rs`, and `vision_download.rs`.
-- [ ] **`src/ui/hf_browser/`:**
+- [x] **`src/ui/hf_browser/`:**
   - Replace `attach_entry_to_tracker` (182 lines, 9 args) and `repo_rows.rs` (2 `too_many_arguments` functions) with a `HfBrowserContext` struct + small helper methods.
   - Break `build_starter_model_row` (`starter_models.rs`, 225 lines) into focused sub-builders (`build_starter_header`, `wire_starter_download_button`, `apply_starter_state`).
-- [ ] **Oversized dialogs (`<= 400` lines each, `<= 50` lines per builder function):**
+- [x] **Oversized dialogs (`<= 400` lines each, `<= 50` lines per builder function):**
   - Split `src/ui/message_dialogs.rs` (525 lines) into `src/ui/message_dialogs/` (`mod.rs`, `edit_dialog.rs`, `info_dialog.rs`).
   - Refactor `src/ui/folder_permissions_dialog.rs` (416 lines, `populate_grant_group` 115 lines + `too_many_arguments`) into a `FolderPermissionsDialog` struct holding `db`, `conv_id`, `toast_overlay`, and `on_changed` (passing `&self` instead of 9 arguments).
   - Refactor `src/ui/chat_controls_dialog.rs` (302 lines, 285-line function + `too_many_arguments`) into a `ChatControlsConfig` struct + small section builders (`build_model_section`, `build_prompt_section`, `build_thinking_section`).
   - Refactor `src/ui/model_config_dialog.rs` (261 lines, 248-line function) into `ModelConfigDialog` struct + pure `ModelConfigFormState` (dirty/default calculation extracted and unit-tested).
-- [ ] **Trim remaining large Relm4 components:**
+- [x] **Trim remaining large Relm4 components:**
   - `src/ui/sidebar.rs` (473 lines, 136-line `update`): extract handler methods & `sidebar/search.rs` or `sidebar/actions.rs`.
   - `src/ui/composer/mod.rs` (470 lines, 145-line `update`, 94-line `init`): extract `composer/actions.rs` or per-message handler methods.
 
 ### 5.3 Tests & Verification
-- [ ] Add unit tests for `DownloadManager` with a mock `Fetcher`: start → progress → pause → resume → complete (verifying DB registration + pending removal), and cancel while active vs. cancel while paused (verifying `.part` cleanup).
-- [ ] Add unit tests for `ModelConfigFormState` dirty/reset/save logic.
-- [ ] **Verification:** `grep -rn 'too_many_arguments' src/` returns **0 matches**; every file in `src/ui/` is `<= 400` lines; `cargo test` passes and Settings → Models / Explore / Vision / Dialogs work smoothly in `cargo run`.
+- [x] Add unit tests for `DownloadManager` with a mock `Fetcher`: start → progress → pause → resume → complete (verifying DB registration + pending removal), and cancel while active vs. cancel while paused (verifying `.part` cleanup).
+- [x] Add unit tests for `ModelConfigFormState` dirty/reset/save logic.
+- [x] **Verification:** `grep -rn 'too_many_arguments' src/` returns **0 matches**; every file in `src/ui/` is `<= 400` lines; `cargo test` passes and Settings → Models / Explore / Vision / Dialogs work smoothly in `cargo run`.
 
 ---
 
@@ -411,5 +411,5 @@ Eliminate `Rc<RefCell<Option<Rc<dyn Fn()>>>>` callback slots and 8–12 paramete
 | **Sprint 2** | Storage Hardening & Responsibility Split | `[x]` Done | Atomic migrations, zero DB `.expect()`, pure SQL repos |
 | **Sprint 3** | `ToolRegistry` & Security Fixes | `[x]` Done | Extensible tool system; SSRF & write-escalation bugs fixed |
 | **Sprint 4** | Extract `AgentRunner` from `chat_view` | `[x]` Done | Full headless agent loop tests; thin Relm4 chat renderer |
-| **Sprint 5** | `DownloadManager` & UI Cleanup | `[ ]` Planned | Zero `too_many_arguments`; injectable downloads; all UI files `<= 400` LOC |
+| **Sprint 5** | `DownloadManager` & UI Cleanup | `[x]` Done | Zero `too_many_arguments`; injectable downloads; all UI files `<= 400` LOC |
 | **Sprint 6** | Parsers/Inference, Workspace & CI Gates | `[ ]` Planned | Compiler-enforced crate DAG; headless `cargo test`; lint gates |

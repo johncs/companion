@@ -1,7 +1,6 @@
 //! Hugging Face repository expander rows and individual GGUF file rows.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -9,22 +8,17 @@ use gtk::glib;
 
 use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
-use crate::models::hardware::{HardwareInfo, assess_model_fit};
+use crate::models::hardware::assess_model_fit;
 use crate::models::huggingface::{HfGgufFile, HfRepoSummary, list_repo_gguf_files};
 use crate::models::{format_bytes, infer_quantization};
-use crate::storage::Database;
 
-use super::download_controls::{DownloadControls, DownloadTracker};
-use super::download_tracker::start_hf_download;
+use super::HfBrowserContext;
+use super::download_controls::DownloadControls;
+use super::download_tracker::{RowDownloadUi, start_hf_download};
 
 pub(super) fn build_hf_repo_row(
     repo: &HfRepoSummary,
-    hw: &HardwareInfo,
-    db: &Database,
-    dialog: &adw::PreferencesDialog,
-    refresh_installed: &Rc<dyn Fn()>,
-    tracker: &DownloadTracker,
-    models_dir: PathBuf,
+    ctx: &HfBrowserContext,
 ) -> adw::ExpanderRow {
     let expander = adw::ExpanderRow::builder()
         .title(&repo.id)
@@ -45,11 +39,7 @@ pub(super) fn build_hf_repo_row(
 
     let loaded = Rc::new(RefCell::new(false));
     let repo_id = repo.id.clone();
-    let hw = hw.clone();
-    let db = db.clone();
-    let dialog = dialog.clone();
-    let refresh_installed = refresh_installed.clone();
-    let tracker = tracker.clone();
+    let ctx = ctx.clone();
 
     expander.connect_expanded_notify(move |exp| {
         if !exp.is_expanded() || *loaded.borrow() {
@@ -67,14 +57,9 @@ pub(super) fn build_hf_repo_row(
         let exp = exp.clone();
         let placeholder = placeholder.clone();
         let rid = repo_id.clone();
-        let hw = hw.clone();
-        let db = db.clone();
-        let dialog = dialog.clone();
-        let refresh_installed = refresh_installed.clone();
-        let tracker = tracker.clone();
-        let models_dir = models_dir.clone();
-
+        let ctx = ctx.clone();
         let loaded_flag = loaded.clone();
+
         glib::MainContext::default().spawn_local(async move {
             match rx.await {
                 Ok(Ok(files)) if files.is_empty() => {
@@ -82,17 +67,7 @@ pub(super) fn build_hf_repo_row(
                 }
                 Ok(Ok(files)) => {
                     exp.remove(&placeholder);
-                    populate_repo_files(
-                        &exp,
-                        &rid,
-                        files,
-                        &hw,
-                        &db,
-                        &dialog,
-                        &refresh_installed,
-                        &tracker,
-                        &models_dir,
-                    );
+                    populate_repo_files(&exp, &rid, files, &ctx);
                 }
                 Ok(Err(err)) => {
                     *loaded_flag.borrow_mut() = false;
@@ -111,17 +86,11 @@ pub(super) fn build_hf_repo_row(
     expander
 }
 
-#[allow(clippy::too_many_arguments)]
 fn populate_repo_files(
     exp: &adw::ExpanderRow,
     repo_id: &str,
     files: Vec<HfGgufFile>,
-    hw: &HardwareInfo,
-    db: &Database,
-    dialog: &adw::PreferencesDialog,
-    refresh_installed: &Rc<dyn Fn()>,
-    tracker: &DownloadTracker,
-    models_dir: &PathBuf,
+    ctx: &HfBrowserContext,
 ) {
     let mut mmproj_file: Option<HfGgufFile> = None;
     let mut model_files: Vec<HfGgufFile> = Vec::with_capacity(files.len());
@@ -137,17 +106,7 @@ fn populate_repo_files(
 
     if model_files.is_empty() {
         if let Some(mm) = mmproj_file {
-            exp.add_row(&build_hf_file_row(
-                repo_id,
-                &mm,
-                None,
-                hw,
-                db,
-                dialog,
-                refresh_installed,
-                tracker,
-                models_dir.clone(),
-            ));
+            exp.add_row(&build_hf_file_row(repo_id, &mm, None, ctx));
         }
         return;
     }
@@ -157,30 +116,19 @@ fn populate_repo_files(
             repo_id,
             &file,
             mmproj_file.as_ref(),
-            hw,
-            db,
-            dialog,
-            refresh_installed,
-            tracker,
-            models_dir.clone(),
+            ctx,
         ));
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_hf_file_row(
     repo_id: &str,
     file: &HfGgufFile,
     mmproj_file: Option<&HfGgufFile>,
-    hw: &HardwareInfo,
-    db: &Database,
-    dialog: &adw::PreferencesDialog,
-    refresh_installed: &Rc<dyn Fn()>,
-    tracker: &DownloadTracker,
-    models_dir: PathBuf,
+    ctx: &HfBrowserContext,
 ) -> adw::ActionRow {
     let quant = infer_quantization(&file.filename).unwrap_or_else(|| "GGUF".to_string());
-    let fit = assess_model_fit(file.size_bytes, hw.total_ram_bytes);
+    let fit = assess_model_fit(file.size_bytes, ctx.hw.total_ram_bytes);
 
     let mut subtitle_parts = vec![format_bytes(file.size_bytes), quant, fit.label()];
     if mmproj_file.is_some() {
@@ -193,7 +141,6 @@ fn build_hf_file_row(
         .build();
 
     let controls = DownloadControls::new();
-
     let download_btn = gtk::Button::builder()
         .icon_name("folder-download-symbolic")
         .tooltip_text(gettext("Download AI model"))
@@ -205,17 +152,17 @@ fn build_hf_file_row(
     let on_cancel_handler: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
     {
-        let on_pause_handler = on_pause_handler.clone();
+        let on_pause = on_pause_handler.clone();
         controls.pause_btn.connect_clicked(move |_| {
-            if let Some(cb) = on_pause_handler.borrow().clone() {
+            if let Some(cb) = on_pause.borrow().clone() {
                 cb();
             }
         });
     }
     {
-        let on_cancel_handler = on_cancel_handler.clone();
+        let on_cancel = on_cancel_handler.clone();
         controls.cancel_btn.connect_clicked(move |_| {
-            if let Some(cb) = on_cancel_handler.borrow().clone() {
+            if let Some(cb) = on_cancel.borrow().clone() {
                 cb();
             }
         });
@@ -225,28 +172,23 @@ fn build_hf_file_row(
         let repo_id = repo_id.to_string();
         let filename = file.filename.clone();
         let mmproj_name = mmproj_file.map(|m| m.filename.clone());
-        let db = db.clone();
-        let dialog = dialog.clone();
-        let refresh_installed = refresh_installed.clone();
-        let tracker = tracker.clone();
+        let ctx = ctx.clone();
         let controls = controls.clone();
-        let on_pause_handler = on_pause_handler.clone();
-        let on_cancel_handler = on_cancel_handler.clone();
+        let on_pause = on_pause_handler.clone();
+        let on_cancel = on_cancel_handler.clone();
 
         download_btn.connect_clicked(move |btn| {
             start_hf_download(
-                btn,
-                &controls,
-                &on_pause_handler,
-                &on_cancel_handler,
+                &ctx,
                 &repo_id,
                 &filename,
                 mmproj_name.as_deref(),
-                &db,
-                &dialog,
-                &refresh_installed,
-                &tracker,
-                models_dir.clone(),
+                RowDownloadUi {
+                    btn: btn.clone(),
+                    controls: controls.clone(),
+                    on_pause: on_pause.clone(),
+                    on_cancel: on_cancel.clone(),
+                },
             );
         });
     }

@@ -7,8 +7,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use crate::i18n::gettext;
-
-use super::download_state::ACTIVE_DOWNLOADS;
+use crate::models::download_manager::DownloadManager;
 
 /// Reusable inline download controls: percentage label, progress bar, pause/resume, and cancel.
 #[derive(Clone)]
@@ -129,14 +128,8 @@ impl DownloadTracker {
         }
     }
 
-    pub fn is_repo_active(&self, repo_id: &str) -> bool {
-        if self.active_repos.borrow().contains(repo_id) {
-            return true;
-        }
-        ACTIVE_DOWNLOADS
-            .lock()
-            .map(|m| m.keys().any(|(r, _)| r == repo_id))
-            .unwrap_or(false)
+    pub fn is_repo_active(&self, mgr: &DownloadManager, repo_id: &str) -> bool {
+        self.active_repos.borrow().contains(repo_id) || mgr.is_repo_active(repo_id)
     }
 
     /// Add an active download row and return `(DownloadControls, remove_callback)`.

@@ -161,18 +161,23 @@ pub(super) fn sync_active_model_details(info: Option<&InstalledModelInfo>, rows:
     rows.details_expander.set_visible(true);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Dependencies needed to render and delete an installed model row.
+#[derive(Clone)]
+pub(super) struct InstalledRowCtx {
+    pub(super) db: Database,
+    pub(super) installed_group: adw::PreferencesGroup,
+    pub(super) active_id_state: Rc<RefCell<Option<String>>>,
+    pub(super) on_active_changed: Rc<dyn Fn(Option<String>)>,
+    pub(super) dialog: adw::PreferencesDialog,
+    pub(super) refresh_weak: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    pub(super) models_dir: PathBuf,
+}
+
 pub(super) fn build_installed_model_row(
     model: &ModelRecord,
     file_size: Option<u64>,
     is_active: bool,
-    db: &Database,
-    installed_group: &adw::PreferencesGroup,
-    active_id_state: &Rc<RefCell<Option<String>>>,
-    on_active_changed: &Rc<dyn Fn(Option<String>)>,
-    dialog: &adw::PreferencesDialog,
-    refresh_weak: &Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-    models_dir: PathBuf,
+    ctx: &InstalledRowCtx,
 ) -> (adw::ActionRow, gtk::Label) {
     let size_str = file_size
         .map(format_bytes)
@@ -199,13 +204,14 @@ pub(super) fn build_installed_model_row(
         .css_classes(["flat"])
         .build();
     {
-        let db = db.clone();
-        let installed_group = installed_group.clone();
-        let active_id_state = active_id_state.clone();
-        let on_active_changed = on_active_changed.clone();
-        let dialog = dialog.clone();
-        let refresh_weak = refresh_weak.clone();
+        let db = ctx.db.clone();
+        let installed_group = ctx.installed_group.clone();
+        let active_id_state = ctx.active_id_state.clone();
+        let on_active_changed = ctx.on_active_changed.clone();
+        let dialog = ctx.dialog.clone();
+        let refresh_weak = ctx.refresh_weak.clone();
         let model_clone = model.clone();
+        let models_dir = ctx.models_dir.clone();
 
         delete_btn.connect_clicked(move |_| {
             let is_managed_file = model_clone

@@ -11,6 +11,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use crate::i18n::gettext;
+use crate::models::download_manager::DownloadManager;
 use crate::models::hardware::probe_hardware;
 use crate::storage::Database;
 use crate::ui::model_manager::build_models_page;
@@ -28,6 +29,7 @@ pub fn present_settings_dialog<F, P, W>(
     parent: &impl IsA<gtk::Widget>,
     db: Database,
     models_dir: PathBuf,
+    download_manager: DownloadManager,
     active_model_id: Option<String>,
     initial_page: &str,
     on_active_changed: F,
@@ -63,6 +65,7 @@ pub fn present_settings_dialog<F, P, W>(
         db.clone(),
         hw,
         models_dir,
+        download_manager,
         active_model_id,
         Rc::new(on_active_changed),
     );
