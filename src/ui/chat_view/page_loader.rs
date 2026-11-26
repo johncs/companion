@@ -3,7 +3,6 @@
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::inference::provider::InferenceParams;
 use crate::storage::{AttachmentRecord, Database, ToolCallRecord};
 
 pub(super) const PAGE_SIZE: usize = 20;
@@ -33,22 +32,6 @@ pub(super) fn scroll_scroller_to_bottom(scroller: &gtk::ScrolledWindow) {
     let vadj = scroller.vadjustment();
     let target = (vadj.upper() - vadj.page_size()).max(0.0);
     vadj.set_value(target);
-}
-
-pub(super) fn parse_model_params(json_str: &str) -> InferenceParams {
-    let mut params = InferenceParams::default();
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-        if let Some(ctx) = val.get("n_ctx").and_then(|v| v.as_u64()) {
-            params.n_ctx = ctx as u32;
-        }
-        if let Some(gpu) = val.get("n_gpu_layers").and_then(|v| v.as_u64()) {
-            params.n_gpu_layers = gpu as u32;
-        }
-        if let Some(temp) = val.get("temperature").and_then(|v| v.as_f64()) {
-            params.temperature = temp as f32;
-        }
-    }
-    params
 }
 
 /// Fetch a conversation page from SQLite and parse all Markdown/syntect blocks in parallel across CPU cores.
@@ -104,7 +87,7 @@ pub(super) fn load_and_parse_page(
             {
                 s.spawn(move || {
                     for (m, slot) in msg_chunk.iter().zip(out_chunk.iter_mut()) {
-                        *slot = if m.role == "assistant" {
+                        *slot = if m.role == crate::core::types::MessageRole::Assistant {
                             crate::core::markdown::parse_markdown_blocks(&m.content)
                         } else {
                             vec![crate::core::markdown::MarkdownBlock::Text(
@@ -133,20 +116,4 @@ pub(super) fn load_and_parse_page(
         oldest_loaded_ts,
         est_tokens,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_model_params_overrides_valid_fields_and_falls_back() {
-        let p = parse_model_params(r#"{"n_ctx": 8192, "n_gpu_layers": 32, "temperature": 0.3}"#);
-        assert_eq!(p.n_ctx, 8192);
-        assert_eq!(p.n_gpu_layers, 32);
-        assert!((p.temperature - 0.3).abs() < 1e-4);
-
-        let def = parse_model_params("invalid");
-        assert_eq!(def.n_ctx, InferenceParams::default().n_ctx);
-    }
 }

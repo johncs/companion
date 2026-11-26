@@ -1,5 +1,6 @@
 //! Background Tokio download worker for Hugging Face GGUF + optional `mmproj` files.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -8,13 +9,16 @@ use gtk::glib;
 use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
 use crate::models::huggingface::{download_gguf_file, remove_part_file};
-use crate::models::managed_models_dir;
 use crate::storage::Database;
 use crate::ui::widgets::send_desktop_notification;
 
 use super::download_state::{ACTIVE_DOWNLOADS, ActiveDownloadEntry};
 
-pub(super) fn launch_entry_task(entry_arc: Arc<Mutex<ActiveDownloadEntry>>, db: Database) {
+pub(super) fn launch_entry_task(
+    entry_arc: Arc<Mutex<ActiveDownloadEntry>>,
+    db: Database,
+    models_dir: PathBuf,
+) {
     let (repo_id, filename, mmproj_name, display_name, stop_flag) = {
         let mut entry = entry_arc.lock().expect("active download mutex poisoned");
         let flag = Arc::new(AtomicBool::new(false));
@@ -31,7 +35,7 @@ pub(super) fn launch_entry_task(entry_arc: Arc<Mutex<ActiveDownloadEntry>>, db: 
     };
 
     let safe_repo = repo_id.replace('/', "--");
-    let repo_dir = managed_models_dir().join(&safe_repo);
+    let repo_dir = models_dir.join(&safe_repo);
     let dest_path = repo_dir.join(&filename);
     let mmproj_dest = mmproj_name.as_deref().map(|m| repo_dir.join(m));
 

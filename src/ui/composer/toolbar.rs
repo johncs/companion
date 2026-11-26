@@ -92,7 +92,7 @@ impl ComposerModel {
             &[("count", &self.granted_folders.len().to_string())],
         );
         for f in &self.granted_folders {
-            let mode_label = if f.permission_mode == "read_write" {
+            let mode_label = if f.permission_mode.allows_write() {
                 gettext("Read & Write")
             } else {
                 gettext("Read-Only")

@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::{Row, params};
 
+use crate::core::types::{PermissionDecision, ToolCallStatus};
+
 use super::Database;
 use super::entities::ToolCallRecord;
 
@@ -20,9 +22,9 @@ impl Database {
                 tc.message_id,
                 tc.tool_name,
                 tc.arguments_json,
-                tc.status,
+                tc.status.as_str(),
                 tc.output,
-                tc.permission_decision,
+                tc.permission_decision.as_str(),
                 tc.created_at,
             ],
         )?;
@@ -59,14 +61,16 @@ impl Database {
 }
 
 fn map_tool_call(row: &Row<'_>) -> rusqlite::Result<ToolCallRecord> {
+    let status_raw: String = row.get(4)?;
+    let decision_raw: String = row.get(6)?;
     Ok(ToolCallRecord {
         id: row.get(0)?,
         message_id: row.get(1)?,
         tool_name: row.get(2)?,
         arguments_json: row.get(3)?,
-        status: row.get(4)?,
+        status: ToolCallStatus::from_str_lossy(&status_raw),
         output: row.get(5)?,
-        permission_decision: row.get(6)?,
+        permission_decision: PermissionDecision::from_str_lossy(&decision_raw),
         created_at: row.get(7)?,
     })
 }

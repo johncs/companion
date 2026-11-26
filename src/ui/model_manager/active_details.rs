@@ -1,14 +1,14 @@
 //! Active model detail rows syncing and installed model list row construction.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
 
 use crate::i18n::{gettext, tr_f};
+use crate::models::format_bytes;
 use crate::models::gguf::format_context_label;
-use crate::models::{format_bytes, managed_models_dir};
 use crate::storage::{Database, ModelRecord};
 use crate::ui::widgets::present_destructive_confirm;
 
@@ -172,6 +172,7 @@ pub(super) fn build_installed_model_row(
     on_active_changed: &Rc<dyn Fn(Option<String>)>,
     dialog: &adw::PreferencesDialog,
     refresh_weak: &Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    models_dir: PathBuf,
 ) -> (adw::ActionRow, gtk::Label) {
     let size_str = file_size
         .map(format_bytes)
@@ -207,11 +208,10 @@ pub(super) fn build_installed_model_row(
         let model_clone = model.clone();
 
         delete_btn.connect_clicked(move |_| {
-            let managed_dir = managed_models_dir();
             let is_managed_file = model_clone
                 .file_path
                 .as_deref()
-                .is_some_and(|p| Path::new(p).starts_with(&managed_dir));
+                .is_some_and(|p| Path::new(p).starts_with(&models_dir));
 
             let body = if is_managed_file {
                 tr_f(
@@ -231,6 +231,7 @@ pub(super) fn build_installed_model_row(
             let dialog = dialog.clone();
             let refresh_weak = refresh_weak.clone();
             let model_inner = model_clone.clone();
+            let models_dir_inner = models_dir.clone();
 
             present_destructive_confirm(
                 &installed_group,
@@ -244,7 +245,7 @@ pub(super) fn build_installed_model_row(
                         .into_iter()
                         .filter(|m| m.id != model_inner.id)
                         .collect();
-                    delete_managed_model_files(&managed_dir, &model_inner, &others);
+                    delete_managed_model_files(&models_dir_inner, &model_inner, &others);
                     let _ = db.delete_model(&model_inner.id);
                     if active_id_state.borrow().as_deref() == Some(&model_inner.id) {
                         *active_id_state.borrow_mut() = None;

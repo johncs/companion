@@ -5,58 +5,27 @@ use chrono::Utc;
 use rusqlite::{Row, params};
 use uuid::Uuid;
 
+use crate::core::ThinkingLevel;
+use crate::core::types::{ExecutionDevice, MessageRole};
+
 use super::Database;
-use super::entities::Message;
+use super::entities::{Message, NewMessage};
 
 impl Database {
     /// Insert a message into a conversation and bump its `updated_at` timestamp.
-    pub fn insert_message(
-        &self,
-        conversation_id: &str,
-        role: &str,
-        content: &str,
-        reasoning_content: Option<&str>,
-        thinking_level: Option<&str>,
-    ) -> Result<Message> {
-        self.insert_message_with_metrics(
-            conversation_id,
-            role,
-            content,
-            reasoning_content,
-            thinking_level,
-            None,
-            None,
-            0,
-            None,
-        )
-    }
-
-    /// Insert a message along with model name, completion token count, and generation duration (ms).
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_message_with_metrics(
-        &self,
-        conversation_id: &str,
-        role: &str,
-        content: &str,
-        reasoning_content: Option<&str>,
-        thinking_level: Option<&str>,
-        model_name: Option<&str>,
-        execution_device: Option<&str>,
-        token_count: i64,
-        generation_ms: Option<i64>,
-    ) -> Result<Message> {
+    pub fn insert_message(&self, new: NewMessage<'_>) -> Result<Message> {
         let now = Utc::now().timestamp_millis();
         let msg = Message {
             id: Uuid::new_v4().to_string(),
-            conversation_id: conversation_id.to_string(),
-            role: role.to_string(),
-            content: content.to_string(),
-            reasoning_content: reasoning_content.map(str::to_string),
-            thinking_level: thinking_level.map(str::to_string),
-            model_name: model_name.map(str::to_string),
-            execution_device: execution_device.map(str::to_string),
-            token_count,
-            generation_ms,
+            conversation_id: new.conversation_id.to_string(),
+            role: new.role,
+            content: new.content.to_string(),
+            reasoning_content: new.reasoning_content.map(str::to_string),
+            thinking_level: new.thinking_level,
+            model_name: new.model_name.map(str::to_string),
+            execution_device: new.execution_device,
+            token_count: new.token_count,
+            generation_ms: new.generation_ms,
             created_at: now,
         };
 
@@ -67,12 +36,12 @@ impl Database {
             params![
                 msg.id,
                 msg.conversation_id,
-                msg.role,
+                msg.role.as_str(),
                 msg.content,
                 msg.reasoning_content,
-                msg.thinking_level,
+                msg.thinking_level.map(ThinkingLevel::as_str),
                 msg.model_name,
-                msg.execution_device,
+                msg.execution_device.map(ExecutionDevice::as_str),
                 msg.token_count,
                 msg.generation_ms,
                 msg.created_at,
@@ -80,7 +49,7 @@ impl Database {
         )?;
         conn.execute(
             "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-            params![now, conversation_id],
+            params![now, new.conversation_id],
         )?;
         Ok(msg)
     }
@@ -181,15 +150,18 @@ impl Database {
 }
 
 fn map_message(row: &Row<'_>) -> rusqlite::Result<Message> {
+    let role_raw: String = row.get(2)?;
+    let thinking_raw: Option<String> = row.get(5)?;
+    let device_raw: Option<String> = row.get(7)?;
     Ok(Message {
         id: row.get(0)?,
         conversation_id: row.get(1)?,
-        role: row.get(2)?,
+        role: MessageRole::from_str_lossy(&role_raw),
         content: row.get(3)?,
         reasoning_content: row.get(4)?,
-        thinking_level: row.get(5)?,
+        thinking_level: thinking_raw.as_deref().map(ThinkingLevel::from_str_lossy),
         model_name: row.get(6)?,
-        execution_device: row.get(7)?,
+        execution_device: device_raw.as_deref().map(ExecutionDevice::from_str_lossy),
         token_count: row.get(8)?,
         generation_ms: row.get(9)?,
         created_at: row.get(10)?,

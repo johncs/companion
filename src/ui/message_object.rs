@@ -68,7 +68,7 @@ impl MessageObject {
         attachments: Vec<AttachmentRecord>,
         tool_calls: Vec<ToolCallRecord>,
     ) -> Self {
-        let blocks = if msg.role == "assistant" {
+        let blocks = if msg.role == crate::core::types::MessageRole::Assistant {
             parse_markdown_blocks(&msg.content)
         } else {
             vec![MarkdownBlock::Text(
@@ -88,12 +88,12 @@ impl MessageObject {
         let obj: Self = glib::Object::new();
         *obj.imp().entry.borrow_mut() = Some(MessageEntry {
             id: msg.id.clone(),
-            role: msg.role.clone(),
+            role: msg.role.as_str().to_string(),
             content: msg.content.clone(),
             reasoning_content: msg.reasoning_content.clone(),
-            thinking_level: msg.thinking_level.clone(),
+            thinking_level: msg.thinking_level.map(|t| t.as_str().to_string()),
             model_name: msg.model_name.clone(),
-            execution_device: msg.execution_device.clone(),
+            execution_device: msg.execution_device.map(|d| d.as_str().to_string()),
             token_count: msg.token_count,
             generation_ms: msg.generation_ms,
             created_at: msg.created_at,

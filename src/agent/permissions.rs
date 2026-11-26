@@ -3,12 +3,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionDecision {
-    Deny,
-    AllowOnce,
-    AllowChat,
-}
+pub use crate::core::types::PermissionDecision;
 
 /// Evaluates and remembers whether an agent tool may run without prompting.
 #[derive(Clone, Default)]

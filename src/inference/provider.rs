@@ -7,24 +7,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::core::ThinkingLevel;
-
-/// Role of a message in an inference prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
-    System,
-    User,
-    Assistant,
-}
-
-impl ChatRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::User => "user",
-            Self::Assistant => "assistant",
-        }
-    }
-}
+pub use crate::core::types::MessageRole as ChatRole;
 
 /// A single turn passed to a [`ModelProvider`] for generation.
 #[derive(Debug, Clone)]

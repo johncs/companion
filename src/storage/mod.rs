@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 pub use entities::{
-    AttachmentRecord, Conversation, ConversationFolder, ModelRecord, PendingDownload,
+    AttachmentRecord, Conversation, ConversationFolder, ModelRecord, NewMessage, PendingDownload,
     ToolCallRecord,
 };
 
@@ -79,6 +79,8 @@ mod tests {
 
     #[test]
     fn conversations_messages_and_fts_search() {
+        use crate::core::types::MessageRole;
+
         let db = Database::open_in_memory().expect("open in-memory db");
 
         let arch_chat = db
@@ -90,13 +92,17 @@ mod tests {
 
         assert_eq!(db.list_conversations(50).unwrap().len(), 2);
 
-        db.insert_message(
-            &quick_chat.id,
-            "user",
-            "How does virtual scrolling work in GTK4 ListView?",
-            None,
-            None,
-        )
+        db.insert_message(NewMessage {
+            conversation_id: &quick_chat.id,
+            role: MessageRole::User,
+            content: "How does virtual scrolling work in GTK4 ListView?",
+            reasoning_content: None,
+            thinking_level: None,
+            model_name: None,
+            execution_device: None,
+            token_count: 0,
+            generation_ms: None,
+        })
         .expect("insert message");
 
         let page = db.list_messages_page(&quick_chat.id, None, 20).unwrap();
@@ -117,12 +123,25 @@ mod tests {
 
     #[test]
     fn paginated_messages_handle_large_history() {
+        use crate::core::types::MessageRole;
+
         let db = Database::open_in_memory().expect("open in-memory db");
         let conv = db.create_conversation("Long Chat").unwrap();
 
         for i in 0..120 {
-            db.insert_message(&conv.id, "user", &format!("Message {i}"), None, None)
-                .unwrap();
+            let content = format!("Message {i}");
+            db.insert_message(NewMessage {
+                conversation_id: &conv.id,
+                role: MessageRole::User,
+                content: &content,
+                reasoning_content: None,
+                thinking_level: None,
+                model_name: None,
+                execution_device: None,
+                token_count: 0,
+                generation_ms: None,
+            })
+            .unwrap();
         }
 
         let latest = db.list_messages_page(&conv.id, None, 50).unwrap();
@@ -137,12 +156,34 @@ mod tests {
 
     #[test]
     fn duplicate_conversation_preserves_messages() {
+        use crate::core::types::MessageRole;
+
         let db = Database::open_in_memory().expect("open in-memory db");
         let orig = db.create_conversation("Design").unwrap();
-        db.insert_message(&orig.id, "user", "Hello", None, None)
-            .unwrap();
-        db.insert_message(&orig.id, "assistant", "Hi there!", None, None)
-            .unwrap();
+        db.insert_message(NewMessage {
+            conversation_id: &orig.id,
+            role: MessageRole::User,
+            content: "Hello",
+            reasoning_content: None,
+            thinking_level: None,
+            model_name: None,
+            execution_device: None,
+            token_count: 0,
+            generation_ms: None,
+        })
+        .unwrap();
+        db.insert_message(NewMessage {
+            conversation_id: &orig.id,
+            role: MessageRole::Assistant,
+            content: "Hi there!",
+            reasoning_content: None,
+            thinking_level: None,
+            model_name: None,
+            execution_device: None,
+            token_count: 0,
+            generation_ms: None,
+        })
+        .unwrap();
 
         let dup = db
             .duplicate_conversation(&orig.id)
@@ -154,17 +195,30 @@ mod tests {
 
     #[test]
     fn edit_message_truncates_subsequent_messages() {
+        use crate::core::types::MessageRole;
+
         let db = Database::open_in_memory().expect("open in-memory db");
         let conv = db.create_conversation("Truncate Test").unwrap();
-        let m1 = db.insert_message(&conv.id, "user", "First", None, None).unwrap();
+        let simple = |role: MessageRole, content: &'static str| NewMessage {
+            conversation_id: &conv.id,
+            role,
+            content,
+            reasoning_content: None,
+            thinking_level: None,
+            model_name: None,
+            execution_device: None,
+            token_count: 0,
+            generation_ms: None,
+        };
+        let m1 = db.insert_message(simple(MessageRole::User, "First")).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
         let m2 = db
-            .insert_message(&conv.id, "assistant", "First reply", None, None)
+            .insert_message(simple(MessageRole::Assistant, "First reply"))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let m3 = db.insert_message(&conv.id, "user", "Second", None, None).unwrap();
+        let m3 = db.insert_message(simple(MessageRole::User, "Second")).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        db.insert_message(&conv.id, "assistant", "Second reply", None, None)
+        db.insert_message(simple(MessageRole::Assistant, "Second reply"))
             .unwrap();
 
         db.edit_message_and_truncate_after(&conv.id, &m3.id, m3.created_at, "Second (edited)")
@@ -180,29 +234,35 @@ mod tests {
 
     #[test]
     fn persists_thinking_level_metrics_and_tool_calls() {
+        use crate::core::ThinkingLevel;
+        use crate::core::types::{
+            ExecutionDevice, FolderPermission, MessageRole, PermissionDecision, ToolCallStatus,
+        };
+
         let db = Database::open_in_memory().expect("open in-memory db");
         let conv = db.create_conversation("Metrics").unwrap();
-        assert_eq!(conv.thinking_level, "default");
+        assert_eq!(conv.thinking_level, ThinkingLevel::Default);
 
-        db.set_conversation_thinking_level(&conv.id, "high").unwrap();
+        db.set_conversation_thinking_level(&conv.id, ThinkingLevel::High)
+            .unwrap();
         let loaded = db.get_conversation(&conv.id).unwrap().unwrap();
-        assert_eq!(loaded.thinking_level, "high");
+        assert_eq!(loaded.thinking_level, ThinkingLevel::High);
 
         let msg = db
-            .insert_message_with_metrics(
-                &conv.id,
-                "assistant",
-                "Done",
-                Some("reasoning"),
-                Some("high"),
-                Some("Gemma 4 12B"),
-                Some("cpu"),
-                128,
-                Some(1450),
-            )
+            .insert_message(NewMessage {
+                conversation_id: &conv.id,
+                role: MessageRole::Assistant,
+                content: "Done",
+                reasoning_content: Some("reasoning"),
+                thinking_level: Some(ThinkingLevel::High),
+                model_name: Some("Gemma 4 12B"),
+                execution_device: Some(ExecutionDevice::Cpu),
+                token_count: 128,
+                generation_ms: Some(1450),
+            })
             .unwrap();
         assert_eq!(msg.model_name.as_deref(), Some("Gemma 4 12B"));
-        assert_eq!(msg.execution_device.as_deref(), Some("cpu"));
+        assert_eq!(msg.execution_device, Some(ExecutionDevice::Cpu));
         assert_eq!(msg.token_count, 128);
         assert_eq!(msg.generation_ms, Some(1450));
 
@@ -211,9 +271,9 @@ mod tests {
             message_id: msg.id.clone(),
             tool_name: "read_file".to_string(),
             arguments_json: "{\"path\":\"README.md\"}".to_string(),
-            status: "ok".to_string(),
+            status: ToolCallStatus::Ok,
             output: Some("hello".to_string()),
-            permission_decision: "allow_once".to_string(),
+            permission_decision: PermissionDecision::AllowOnce,
             created_at: 1000,
         };
         db.insert_tool_call(&tc).unwrap();
@@ -228,18 +288,30 @@ mod tests {
         let folders = db.list_conversation_folders(&conv.id).unwrap();
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].folder_path, "/tmp/docs");
-        assert_eq!(folders[0].permission_mode, "read");
-        db.set_conversation_folder_permission(&f1.id, "read_write").unwrap();
+        assert_eq!(folders[0].permission_mode, FolderPermission::Read);
+        db.set_conversation_folder_permission(&f1.id, FolderPermission::ReadWrite)
+            .unwrap();
         assert_eq!(
             db.list_conversation_folders(&conv.id).unwrap()[0].permission_mode,
-            "read_write"
+            FolderPermission::ReadWrite
         );
         db.remove_conversation_folder(&f1.id).unwrap();
         assert!(db.list_conversation_folders(&conv.id).unwrap().is_empty());
 
-        let m1 = db.insert_message(&conv.id, "user", "first", None, None).unwrap();
-        let m2 = db.insert_message(&conv.id, "user", "second", None, None).unwrap();
-        let _m3 = db.insert_message(&conv.id, "assistant", "third", None, None).unwrap();
+        let simple = |role: MessageRole, content: &'static str| NewMessage {
+            conversation_id: &conv.id,
+            role,
+            content,
+            reasoning_content: None,
+            thinking_level: None,
+            model_name: None,
+            execution_device: None,
+            token_count: 0,
+            generation_ms: None,
+        };
+        let m1 = db.insert_message(simple(MessageRole::User, "first")).unwrap();
+        let m2 = db.insert_message(simple(MessageRole::User, "second")).unwrap();
+        let _m3 = db.insert_message(simple(MessageRole::Assistant, "third")).unwrap();
         db.delete_message_and_after(&conv.id, &m2.id, m2.created_at).unwrap();
         let remaining = db.list_messages_page(&conv.id, None, 20).unwrap();
         assert_eq!(remaining.len(), 2);
@@ -247,20 +319,21 @@ mod tests {
 
         db.set_conversation_system_prompt(&conv.id, Some("Custom notes"))
             .unwrap();
-        db.set_conversation_thinking_level(&conv.id, "high")
+        db.set_conversation_thinking_level(&conv.id, ThinkingLevel::High)
             .unwrap();
         let f_ro = db.add_conversation_folder(&conv.id, "/tmp/ro_dir").unwrap();
         let f_rw = db.add_conversation_folder(&conv.id, "/tmp/rw_dir").unwrap();
-        db.set_conversation_folder_permission(&f_rw.id, "read_write").unwrap();
+        db.set_conversation_folder_permission(&f_rw.id, FolderPermission::ReadWrite)
+            .unwrap();
         let dup = db.duplicate_conversation(&conv.id).unwrap().unwrap();
         assert_eq!(dup.system_prompt.as_deref(), Some("Custom notes"));
-        assert_eq!(dup.thinking_level, "high");
+        assert_eq!(dup.thinking_level, ThinkingLevel::High);
         let dup_folders = db.list_conversation_folders(&dup.id).unwrap();
         assert_eq!(dup_folders.len(), 2);
         assert_eq!(dup_folders[0].folder_path, f_ro.folder_path);
-        assert_eq!(dup_folders[0].permission_mode, "read");
+        assert_eq!(dup_folders[0].permission_mode, FolderPermission::Read);
         assert_eq!(dup_folders[1].folder_path, f_rw.folder_path);
-        assert_eq!(dup_folders[1].permission_mode, "read_write");
+        assert_eq!(dup_folders[1].permission_mode, FolderPermission::ReadWrite);
     }
 
     #[test]
@@ -282,6 +355,7 @@ mod tests {
     fn personalization_settings_persist_and_default() {
         let db = Database::open_in_memory().expect("open in-memory db");
         assert_eq!(db.get_assistant_name().unwrap(), "Companion");
+        assert_eq!(db.get_user_name().unwrap(), None);
 
         db.set_assistant_name("Emma").unwrap();
         db.set_user_name("Joe").unwrap();

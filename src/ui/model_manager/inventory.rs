@@ -114,7 +114,7 @@ mod tests {
             hf_repo: None,
             quantization: None,
             supports_thinking: false,
-            default_params_json: "{}".to_string(),
+            default_params: crate::core::model_params::ModelParams::default(),
             avg_tokens_per_sec: None,
         }
     }

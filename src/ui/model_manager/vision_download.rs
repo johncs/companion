@@ -1,6 +1,7 @@
 //! Resumable `mmproj` vision projector download with pause/resume/cancel controls.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,10 +11,10 @@ use gtk::glib;
 
 use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
+use crate::models::friendly_model_name;
 use crate::models::huggingface::{
     HfGgufFile, download_gguf_file, list_repo_gguf_files, remove_part_file, select_best_mmproj,
 };
-use crate::models::{friendly_model_name, managed_models_dir};
 use crate::storage::{Database, ModelRecord};
 use crate::ui::hf_browser::DownloadControls;
 use crate::ui::widgets::{present_destructive_confirm, send_desktop_notification};
@@ -38,6 +39,7 @@ pub(super) fn start_mmproj_download(
     repo_id: String,
     preselected_file: Option<HfGgufFile>,
     refresh_installed: &Rc<dyn Fn()>,
+    models_dir: PathBuf,
 ) {
     btn.set_visible(false);
     controls.reset_active();
@@ -45,7 +47,7 @@ pub(super) fn start_mmproj_download(
     let safe_repo = repo_id.replace('/', "--");
     let initial_dest = preselected_file
         .as_ref()
-        .map(|f| managed_models_dir().join(&safe_repo).join(&f.filename));
+        .map(|f| models_dir.join(&safe_repo).join(&f.filename));
 
     let state = Rc::new(RefCell::new(MmprojDownloadState {
         is_paused: false,
@@ -80,6 +82,7 @@ pub(super) fn start_mmproj_download(
 
             let db_bg = db.clone();
             let repo_bg = repo_id.clone();
+            let models_dir_bg = models_dir.clone();
             let mut updated = model.clone();
             let dest_shared = state.borrow().dest_path.clone();
             let resolved_shared = state.borrow().resolved_file.clone();
@@ -110,7 +113,7 @@ pub(super) fn start_mmproj_download(
                 };
 
                 let safe_repo = repo_bg.replace('/', "--");
-                let dest_path = managed_models_dir()
+                let dest_path = models_dir_bg
                     .join(&safe_repo)
                     .join(&mmproj_file.filename);
                 if let Ok(mut g) = dest_shared.lock() {

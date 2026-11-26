@@ -31,7 +31,7 @@ impl ChatViewModel {
         );
 
         if let Some(conv_id) = &self.active_conversation_id {
-            let granted: Vec<(String, String)> = self
+            let granted: Vec<(String, crate::core::types::FolderPermission)> = self
                 .db
                 .list_conversation_folders(conv_id)
                 .unwrap_or_default()
@@ -47,7 +47,7 @@ impl ChatViewModel {
                     } else {
                         "directory"
                     };
-                    let perm = if mode == "read_write" {
+                    let perm = if mode.allows_write() {
                         "read & write"
                     } else {
                         "read-only"

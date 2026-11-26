@@ -5,6 +5,7 @@ src/agent/web_search/mod.rs
 src/agent/web_search/privacy_guard.rs
 src/core/attachments.rs
 src/core/mod.rs
+src/core/types.rs
 src/inference/llama_cpp/mod.rs
 src/inference/llama_cpp/runner.rs
 src/main.rs

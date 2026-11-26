@@ -5,13 +5,13 @@ mod storage_stats;
 mod tools_group;
 mod web_search_group;
 
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
 
 use crate::i18n::gettext;
 use crate::models::hardware::probe_hardware;
-use crate::models::managed_models_dir;
 use crate::storage::Database;
 use crate::ui::model_manager::build_models_page;
 
@@ -27,6 +27,7 @@ use web_search_group::build_web_search_group;
 pub fn present_settings_dialog<F, P, W>(
     parent: &impl IsA<gtk::Widget>,
     db: Database,
+    models_dir: PathBuf,
     active_model_id: Option<String>,
     initial_page: &str,
     on_active_changed: F,
@@ -44,7 +45,7 @@ pub fn present_settings_dialog<F, P, W>(
         .build();
 
     let hw = probe_hardware();
-    let general_page = build_general_page(&dialog, &db, &hw);
+    let general_page = build_general_page(&dialog, &db, &models_dir, &hw);
 
     let (identity_group, behavior_group, about_group) =
         build_personalization_groups(&db, on_personalization_changed);
@@ -61,6 +62,7 @@ pub fn present_settings_dialog<F, P, W>(
         &dialog,
         db.clone(),
         hw,
+        models_dir,
         active_model_id,
         Rc::new(on_active_changed),
     );
@@ -79,6 +81,7 @@ pub fn present_settings_dialog<F, P, W>(
 fn build_general_page(
     dialog: &adw::PreferencesDialog,
     db: &Database,
+    models_dir: &PathBuf,
     hw: &crate::models::hardware::HardwareInfo,
 ) -> adw::PreferencesPage {
     let general_page = adw::PreferencesPage::builder()
@@ -117,14 +120,18 @@ fn build_general_page(
     });
     appearance_group.add(&style_row);
 
-    let storage_group = build_storage_group(dialog, db);
+    let storage_group = build_storage_group(dialog, db, models_dir);
     general_page.add(&appearance_group);
     general_page.add(&storage_group);
     general_page.add(&build_hardware_group(hw));
     general_page
 }
 
-fn build_storage_group(dialog: &adw::PreferencesDialog, db: &Database) -> adw::PreferencesGroup {
+fn build_storage_group(
+    dialog: &adw::PreferencesDialog,
+    db: &Database,
+    models_dir: &PathBuf,
+) -> adw::PreferencesGroup {
     let storage_group = adw::PreferencesGroup::builder()
         .title(gettext("Storage &amp; Data"))
         .build();
@@ -140,7 +147,7 @@ fn build_storage_group(dialog: &adw::PreferencesDialog, db: &Database) -> adw::P
     db_row.add_suffix(&build_open_folder_button(dialog, db_path.clone(), true));
     storage_group.add(&db_row);
 
-    let models_dir = managed_models_dir();
+    let models_dir = models_dir.clone();
     let models_size_label = build_size_label();
     let models_dir_row = adw::ActionRow::builder()
         .title(gettext("Downloaded AI Model Folder"))

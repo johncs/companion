@@ -1,6 +1,7 @@
 //! UI attachment, pause/cancel wiring, and pending download restoration for `DownloadTracker`.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -9,8 +10,8 @@ use gtk::glib;
 
 use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
+use crate::models::friendly_model_name;
 use crate::models::huggingface::remove_part_file;
-use crate::models::{friendly_model_name, managed_models_dir};
 use crate::storage::{Database, PendingDownload};
 use crate::ui::widgets::{present_destructive_confirm, spawn_blocking_ui};
 
@@ -29,6 +30,7 @@ pub(super) fn attach_entry_to_tracker(
     row_controls: Option<&DownloadControls>,
     on_pause_handler: Option<&Rc<RefCell<Option<Rc<dyn Fn()>>>>>,
     on_cancel_handler: Option<&Rc<RefCell<Option<Rc<dyn Fn()>>>>>,
+    models_dir: PathBuf,
 ) {
     let (repo_id, filename, mmproj_name, display_name, init_done, init_total, init_paused, mut rx) = {
         let entry = entry_arc.lock().expect("active download mutex poisoned");
@@ -47,6 +49,7 @@ pub(super) fn attach_entry_to_tracker(
     let on_pause: Rc<dyn Fn()> = {
         let entry_arc = entry_arc.clone();
         let db = db.clone();
+        let models_dir = models_dir.clone();
         Rc::new(move || {
             let should_resume = {
                 let Ok(mut entry) = entry_arc.lock() else {
@@ -60,7 +63,7 @@ pub(super) fn attach_entry_to_tracker(
                 }
             };
             if should_resume {
-                launch_entry_task(entry_arc.clone(), db.clone());
+                launch_entry_task(entry_arc.clone(), db.clone(), models_dir.clone());
             }
         })
     };
@@ -73,12 +76,14 @@ pub(super) fn attach_entry_to_tracker(
         let repo_id_c = repo_id.clone();
         let filename_c = filename.clone();
         let mmproj_c = mmproj_name.clone();
+        let models_dir_c = models_dir.clone();
         Rc::new(move || {
             let entry_arc = entry_arc.clone();
             let db = db.clone();
             let repo_id_c = repo_id_c.clone();
             let filename_c = filename_c.clone();
             let mmproj_c = mmproj_c.clone();
+            let models_dir_c = models_dir_c.clone();
             let body = tr_f(
                 "Cancel downloading \"{name}\" and delete the partial download from disk?",
                 &[("name", &display_name_confirm)],
@@ -113,7 +118,7 @@ pub(super) fn attach_entry_to_tracker(
                             entry.emit(true, None);
                         }
                         let safe_repo = repo_id_c.replace('/', "--");
-                        let repo_dir = managed_models_dir().join(&safe_repo);
+                        let repo_dir = models_dir_c.join(&safe_repo);
                         let dpath = repo_dir.join(&filename_c);
                         let mpath = mmproj_c.as_deref().map(|m| repo_dir.join(m));
                         let db_c = db.clone();
@@ -209,6 +214,7 @@ pub fn restore_pending_downloads(
     db: &Database,
     dialog: &adw::PreferencesDialog,
     refresh_installed: &Rc<dyn Fn()>,
+    models_dir: PathBuf,
 ) {
     let active_entries: Vec<Arc<Mutex<ActiveDownloadEntry>>> = ACTIVE_DOWNLOADS
         .lock()
@@ -226,6 +232,7 @@ pub fn restore_pending_downloads(
             None,
             None,
             None,
+            models_dir.clone(),
         );
     }
 
@@ -234,6 +241,7 @@ pub fn restore_pending_downloads(
     let db = db.clone();
     let dialog = dialog.clone();
     let refresh_installed = refresh_installed.clone();
+    let models_dir_bg = models_dir.clone();
 
     spawn_blocking_ui(
         move || {
@@ -248,7 +256,7 @@ pub fn restore_pending_downloads(
                     continue;
                 }
                 let safe_repo = item.repo_id.replace('/', "--");
-                let repo_dir = managed_models_dir().join(&safe_repo);
+                let repo_dir = models_dir_bg.join(&safe_repo);
                 let main_part = repo_dir.join(&item.filename).with_extension("gguf.part");
                 let main_done = repo_dir.join(&item.filename);
                 let mm_part = item
@@ -310,6 +318,7 @@ pub fn restore_pending_downloads(
                     None,
                     None,
                     None,
+                    models_dir.clone(),
                 );
             }
         },
@@ -329,6 +338,7 @@ pub(super) fn start_hf_download(
     dialog: &adw::PreferencesDialog,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
 ) {
     btn.set_visible(false);
     controls.reset_active();
@@ -380,9 +390,10 @@ pub(super) fn start_hf_download(
         Some(controls),
         Some(on_pause_handler),
         Some(on_cancel_handler),
+        models_dir.clone(),
     );
 
     if is_new {
-        launch_entry_task(entry_arc, db.clone());
+        launch_entry_task(entry_arc, db.clone(), models_dir);
     }
 }

@@ -1,6 +1,7 @@
 //! Recommended starter model group and 1-click download row.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -24,6 +25,7 @@ pub fn build_starter_model_group(
     dialog: &adw::PreferencesDialog,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title(gettext("Recommended Starter AI Model"))
@@ -33,6 +35,7 @@ pub fn build_starter_model_group(
         dialog,
         refresh_installed,
         tracker,
+        models_dir,
     ));
     group
 }
@@ -43,6 +46,7 @@ pub fn build_starter_model_row(
     dialog: &adw::PreferencesDialog,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
 ) -> adw::ActionRow {
     let default_sub = gettext("Fast, lightweight starter model with Text, Thinking, and Vision");
     let row = adw::ActionRow::builder()
@@ -177,6 +181,7 @@ pub fn build_starter_model_row(
                     &dialog,
                     &refresh_with_badge,
                     &tracker,
+                    models_dir.clone(),
                 );
                 return;
             }
@@ -212,6 +217,7 @@ pub fn build_starter_model_row(
             let refresh_installed = refresh_installed.clone();
             let tracker = tracker.clone();
             let installed_label = installed_label.clone();
+            let models_dir_async = models_dir.clone();
 
             glib::MainContext::default().spawn_local(async move {
                 let res = rx.await;
@@ -240,6 +246,7 @@ pub fn build_starter_model_row(
                             &dialog,
                             &refresh_with_badge,
                             &tracker,
+                            models_dir_async,
                         );
                     }
                     Ok(Err(err)) => {

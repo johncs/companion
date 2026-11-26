@@ -2,6 +2,9 @@
 
 pub mod attachments;
 pub mod markdown;
+pub mod model_params;
+pub mod paths;
+pub mod types;
 
 use std::sync::LazyLock;
 
@@ -51,7 +54,8 @@ where
 }
 
 /// Configurable reasoning effort level for models that support thinking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     #[default]
     Default,

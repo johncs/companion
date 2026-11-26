@@ -349,7 +349,7 @@ impl SimpleComponent for ChatViewModel {
                     .unwrap_or_else(|| default_system_prompt().to_string());
                 self.active_thinking_level = loaded_conv
                     .as_ref()
-                    .map(|c| ThinkingLevel::from_str_lossy(&c.thinking_level))
+                    .map(|c| c.thinking_level)
                     .unwrap_or_default();
                 self.web_search_enabled = loaded_conv
                     .as_ref()
@@ -513,7 +513,7 @@ impl SimpleComponent for ChatViewModel {
                 if let Some(conv_id) = &self.active_conversation_id {
                     let _ = self
                         .db
-                        .set_conversation_thinking_level(conv_id, level.as_str());
+                        .set_conversation_thinking_level(conv_id, level);
                 }
             }
             ChatViewMsg::WebSearchToggled(enabled) => {

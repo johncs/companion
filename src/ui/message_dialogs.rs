@@ -479,7 +479,7 @@ fn build_tool_call_row(tc: &crate::storage::ToolCallRecord) -> adw::ActionRow {
         _ => "dim-label",
     };
     let status_lbl = gtk::Label::builder()
-        .label(&tc.status)
+        .label(tc.status.as_str())
         .valign(gtk::Align::Center)
         .css_classes([status_class])
         .build();
@@ -516,7 +516,7 @@ fn summarize_tool_call(tc: &crate::storage::ToolCallRecord) -> String {
         raw_target
     };
 
-    if tc.status != "ok"
+    if tc.status != crate::core::types::ToolCallStatus::Ok
         && let Some(err) = tc.output.as_deref().map(str::trim).filter(|s| !s.is_empty())
     {
         return format!("{target} — {err}");

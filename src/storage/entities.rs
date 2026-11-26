@@ -1,5 +1,11 @@
 //! Domain entities persisted in Companion's local SQLite database.
 
+use crate::core::ThinkingLevel;
+use crate::core::model_params::ModelParams;
+use crate::core::types::{
+    ExecutionDevice, FolderPermission, MessageRole, PermissionDecision, ToolCallStatus,
+};
+
 /// A chat session.
 #[derive(Debug, Clone)]
 pub struct Conversation {
@@ -8,45 +14,51 @@ pub struct Conversation {
     pub model_id: Option<String>,
     pub persona_id: Option<String>,
     pub system_prompt: Option<String>,
-    pub thinking_level: String,
+    pub thinking_level: ThinkingLevel,
     pub web_search_enabled: bool,
     pub pinned: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-/// A single turn in a [`Conversation`] (user, assistant, or tool output).
+/// A granted local folder or file in a [`Conversation`].
 #[derive(Debug, Clone)]
 pub struct ConversationFolder {
     pub id: String,
     pub conversation_id: String,
     pub folder_path: String,
-    pub permission_mode: String,
+    pub permission_mode: FolderPermission,
     pub created_at: i64,
 }
 
+/// A single persisted message in a [`Conversation`].
 #[derive(Debug, Clone)]
 pub struct Message {
     pub id: String,
     pub conversation_id: String,
-    pub role: String,
+    pub role: MessageRole,
     pub content: String,
     pub reasoning_content: Option<String>,
-    pub thinking_level: Option<String>,
+    pub thinking_level: Option<ThinkingLevel>,
     pub model_name: Option<String>,
-    pub execution_device: Option<String>,
+    pub execution_device: Option<ExecutionDevice>,
     pub token_count: i64,
     pub generation_ms: Option<i64>,
     pub created_at: i64,
 }
 
-/// A reusable system prompt and inference parameter preset.
-#[allow(dead_code)]
+/// Parameters for inserting a new [`Message`] into SQLite.
 #[derive(Debug, Clone)]
-pub struct Persona {
-    pub id: String,
-    pub name: String,
-    pub system_prompt: String,
+pub struct NewMessage<'a> {
+    pub conversation_id: &'a str,
+    pub role: MessageRole,
+    pub content: &'a str,
+    pub reasoning_content: Option<&'a str>,
+    pub thinking_level: Option<ThinkingLevel>,
+    pub model_name: Option<&'a str>,
+    pub execution_device: Option<ExecutionDevice>,
+    pub token_count: i64,
+    pub generation_ms: Option<i64>,
 }
 
 /// A file or image attached to a chat [`Message`].
@@ -68,9 +80,9 @@ pub struct ToolCallRecord {
     pub message_id: String,
     pub tool_name: String,
     pub arguments_json: String,
-    pub status: String,
+    pub status: ToolCallStatus,
     pub output: Option<String>,
-    pub permission_decision: String,
+    pub permission_decision: PermissionDecision,
     pub created_at: i64,
 }
 
@@ -85,7 +97,7 @@ pub struct ModelRecord {
     pub hf_repo: Option<String>,
     pub quantization: Option<String>,
     pub supports_thinking: bool,
-    pub default_params_json: String,
+    pub default_params: ModelParams,
     pub avg_tokens_per_sec: Option<f64>,
 }
 
@@ -99,45 +111,8 @@ pub struct PendingDownload {
 }
 
 impl ModelRecord {
-    /// Return the configured default thinking level from `default_params_json`,
-    /// falling back to [`crate::core::ThinkingLevel::Default`].
-    pub fn default_thinking_level(&self) -> crate::core::ThinkingLevel {
-        serde_json::from_str::<serde_json::Value>(&self.default_params_json)
-            .ok()
-            .and_then(|v| {
-                v.get("thinking_level")
-                    .and_then(|s| s.as_str())
-                    .map(crate::core::ThinkingLevel::from_str_lossy)
-            })
-            .unwrap_or(crate::core::ThinkingLevel::Default)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::ThinkingLevel;
-
-    #[test]
-    fn parses_default_thinking_level_from_params_json() {
-        let mut model = ModelRecord {
-            id: "m1".to_string(),
-            display_name: "Test".to_string(),
-            provider_type: "llama_cpp".to_string(),
-            file_path: None,
-            mmproj_path: None,
-            hf_repo: None,
-            quantization: None,
-            supports_thinking: true,
-            default_params_json: "{}".to_string(),
-            avg_tokens_per_sec: None,
-        };
-        assert_eq!(model.default_thinking_level(), ThinkingLevel::Default);
-
-        model.default_params_json = r#"{"thinking_level":"high","n_ctx":8192}"#.to_string();
-        assert_eq!(model.default_thinking_level(), ThinkingLevel::High);
-
-        model.default_params_json = "invalid-json".to_string();
-        assert_eq!(model.default_thinking_level(), ThinkingLevel::Default);
+    /// Return the configured default thinking level from `default_params`.
+    pub fn default_thinking_level(&self) -> ThinkingLevel {
+        self.default_params.thinking_level
     }
 }

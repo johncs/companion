@@ -3,6 +3,9 @@
 use anyhow::Result;
 use rusqlite::{OptionalExtension, Row, params};
 
+use crate::core::model_params::ModelParams;
+use crate::core::types::SearchEngine;
+
 use super::Database;
 use super::entities::{ModelRecord, PendingDownload};
 
@@ -35,6 +38,7 @@ impl Database {
     /// Insert or update a model record.
     pub fn upsert_model(&self, model: &ModelRecord) -> Result<()> {
         let conn = self.conn.lock().expect("database mutex poisoned");
+        let default_params_json = model.default_params.to_json()?;
         conn.execute(
             "INSERT INTO models (id, display_name, provider_type, file_path, mmproj_path, hf_repo, quantization, supports_thinking, default_params_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -56,7 +60,7 @@ impl Database {
                 model.hf_repo,
                 model.quantization,
                 model.supports_thinking as i64,
-                model.default_params_json,
+                default_params_json,
             ],
         )?;
         Ok(())
@@ -115,10 +119,13 @@ impl Database {
         let name = display_name.unwrap_or_else(|| crate::models::friendly_model_name(filename));
         let is_starter = hf_repo.as_deref()
             == Some(crate::models::huggingface::RECOMMENDED_STARTER_REPO);
-        let default_params_json = if is_starter {
-            r#"{"n_gpu_layers":0}"#.to_string()
+        let default_params = if is_starter {
+            ModelParams {
+                n_gpu_layers: 0,
+                ..ModelParams::default()
+            }
         } else {
-            "{}".to_string()
+            ModelParams::default()
         };
         let record = ModelRecord {
             id: uuid::Uuid::new_v4().to_string(),
@@ -129,7 +136,7 @@ impl Database {
             hf_repo,
             quantization: crate::models::infer_quantization(filename),
             supports_thinking: crate::models::detect_gguf_supports_thinking(file_path),
-            default_params_json,
+            default_params,
             avg_tokens_per_sec: None,
         };
         self.upsert_model(&record)?;
@@ -232,13 +239,10 @@ impl Database {
     }
 
     pub fn get_user_name(&self) -> Result<Option<String>> {
-        match self.get_setting("user_name")? {
-            Some(saved) => {
-                let trimmed = saved.trim().to_string();
-                Ok((!trimmed.is_empty()).then_some(trimmed))
-            }
-            None => Ok(os_real_name()),
-        }
+        Ok(self
+            .get_setting("user_name")?
+            .map(|saved| saved.trim().to_string())
+            .filter(|trimmed| !trimmed.is_empty()))
     }
 
     pub fn set_user_name(&self, name: &str) -> Result<()> {
@@ -301,17 +305,14 @@ impl Database {
         )
     }
 
-    pub fn get_search_engine(&self) -> Result<crate::agent::web_search::SearchEngine> {
+    pub fn get_search_engine(&self) -> Result<SearchEngine> {
         Ok(self
             .get_setting("web_search_engine")?
-            .map(|s| crate::agent::web_search::SearchEngine::from_str_lossy(&s))
+            .map(|s| SearchEngine::from_str_lossy(&s))
             .unwrap_or_default())
     }
 
-    pub fn set_search_engine(
-        &self,
-        engine: crate::agent::web_search::SearchEngine,
-    ) -> Result<()> {
+    pub fn set_search_engine(&self, engine: SearchEngine) -> Result<()> {
         self.set_setting("web_search_engine", Some(engine.as_str()))
     }
 
@@ -388,13 +389,9 @@ impl Database {
     }
 }
 
-fn os_real_name() -> Option<String> {
-    let name = gtk::glib::real_name().to_string_lossy().trim().to_string();
-    (!name.is_empty() && name != "Unknown").then_some(name)
-}
-
 fn map_model(row: &Row<'_>) -> rusqlite::Result<ModelRecord> {
     let supports_thinking: i64 = row.get(7)?;
+    let raw_params: String = row.get(8)?;
     Ok(ModelRecord {
         id: row.get(0)?,
         display_name: row.get(1)?,
@@ -404,7 +401,7 @@ fn map_model(row: &Row<'_>) -> rusqlite::Result<ModelRecord> {
         hf_repo: row.get(5)?,
         quantization: row.get(6)?,
         supports_thinking: supports_thinking != 0,
-        default_params_json: row.get(8)?,
+        default_params: ModelParams::from_json_lossy(&raw_params),
         avg_tokens_per_sec: row.get(9)?,
     })
 }
@@ -427,7 +424,7 @@ mod tests {
             hf_repo: None,
             quantization: None,
             supports_thinking: false,
-            default_params_json: "{}".to_string(),
+            default_params: ModelParams::default(),
             avg_tokens_per_sec: None,
         };
         db.upsert_model(&model).unwrap();
@@ -537,12 +534,12 @@ mod tests {
                 Some(crate::models::huggingface::RECOMMENDED_STARTER_REPO.to_string()),
             )
             .unwrap();
-        assert_eq!(starter.default_params_json, r#"{"n_gpu_layers":0}"#);
+        assert_eq!(starter.default_params.n_gpu_layers, 0);
 
         let other = db
             .register_local_gguf(None, &dummy_gguf, None, Some("other/model".to_string()))
             .unwrap();
-        assert_eq!(other.default_params_json, "{}");
+        assert_eq!(other.default_params, ModelParams::default());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -6,14 +6,15 @@ mod vision_download;
 mod vision_setup;
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::gio;
 
 use crate::i18n::{gettext, tr_f};
+use crate::models::friendly_model_name;
 use crate::models::hardware::HardwareInfo;
-use crate::models::{friendly_model_name, managed_models_dir};
 use crate::storage::{Database, ModelRecord};
 use crate::ui::hf_browser::{
     DownloadControls, DownloadTracker, build_explore_subpage, build_starter_model_group,
@@ -35,6 +36,7 @@ pub fn build_models_page(
     dialog: &adw::PreferencesDialog,
     db: Database,
     hw: HardwareInfo,
+    models_dir: PathBuf,
     active_model_id: Option<String>,
     on_active_changed: Rc<dyn Fn(Option<String>)>,
 ) -> adw::PreferencesPage {
@@ -241,7 +243,13 @@ pub fn build_models_page(
             }
         })
     };
-    let starter_group = build_starter_model_group(&db, dialog, &starter_refresh_cb, &tracker);
+    let starter_group = build_starter_model_group(
+        &db,
+        dialog,
+        &starter_refresh_cb,
+        &tracker,
+        models_dir.clone(),
+    );
     starter_group.set_visible(false);
     page.add(&starter_group);
     page.add(&downloading_group);
@@ -275,10 +283,11 @@ pub fn build_models_page(
         &active_id_state,
         &on_active_changed,
         &starter_group,
+        models_dir.clone(),
     );
     *refresh_weak_for_active.borrow_mut() = Some(refresh_installed.clone());
     refresh_installed();
-    restore_pending_downloads(&tracker, &db, dialog, &refresh_installed);
+    restore_pending_downloads(&tracker, &db, dialog, &refresh_installed, models_dir.clone());
 
     let tracker_for_explore = tracker.clone();
     {
@@ -286,6 +295,7 @@ pub fn build_models_page(
         let db = db.clone();
         let hw = hw.clone();
         let refresh_installed = refresh_installed.clone();
+        let models_dir = models_dir.clone();
         explore_row.connect_activated(move |_| {
             let subpage = build_explore_subpage(
                 &dialog,
@@ -293,6 +303,7 @@ pub fn build_models_page(
                 hw.clone(),
                 refresh_installed.clone(),
                 tracker_for_explore.clone(),
+                models_dir.clone(),
             );
             dialog.push_subpage(&subpage);
         });
@@ -307,6 +318,7 @@ pub fn build_models_page(
         &refresh_installed,
         &tracker,
         &get_active_record,
+        models_dir,
     );
 
     {
@@ -336,6 +348,7 @@ fn wire_vision_controls(
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
     get_active_record: &Rc<dyn Fn() -> Option<ModelRecord>>,
+    models_dir: PathBuf,
 ) {
     let on_vision_pause: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     let on_vision_cancel: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
@@ -380,6 +393,7 @@ fn wire_vision_controls(
                 repo,
                 None,
                 &refresh_installed,
+                models_dir.clone(),
             );
         } else {
             lookup_and_enable_vision(
@@ -393,6 +407,7 @@ fn wire_vision_controls(
                 model,
                 &refresh_installed,
                 &tracker,
+                models_dir.clone(),
             );
         }
     });
@@ -411,6 +426,7 @@ fn build_refresh_installed_callback(
     active_id_state: &Rc<RefCell<Option<String>>>,
     on_active_changed: &Rc<dyn Fn(Option<String>)>,
     starter_group: &adw::PreferencesGroup,
+    models_dir: PathBuf,
 ) -> Rc<dyn Fn()> {
     let db = db.clone();
     let installed_group = installed_group.clone();
@@ -445,10 +461,12 @@ fn build_refresh_installed_callback(
         let dialog = dialog.clone();
         let refresh_weak_inner = refresh_weak_inner.clone();
         let generation = generation.clone();
+        let models_dir_bg = models_dir.clone();
+        let models_dir_ui = models_dir.clone();
 
         spawn_blocking_ui(
             move || {
-                let _ = db_bg.sync_managed_models(&managed_models_dir());
+                let _ = db_bg.sync_managed_models(&models_dir_bg);
                 let models = db_bg.list_models().unwrap_or_default();
                 stat_models_parallel(models)
             },
@@ -522,6 +540,7 @@ fn build_refresh_installed_callback(
                         &on_active_changed,
                         &dialog,
                         &refresh_weak_inner,
+                        models_dir_ui.clone(),
                     );
                     installed_badges
                         .borrow_mut()

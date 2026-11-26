@@ -427,14 +427,8 @@ impl SimpleComponent for ComposerModel {
                 if let Some(mid) = &self.active_model_id
                     && let Ok(Some(mut rec)) = self.db.get_model(mid)
                 {
-                    let mut val: serde_json::Value =
-                        serde_json::from_str(&rec.default_params_json)
-                            .unwrap_or_else(|_| serde_json::json!({}));
-                    if let Some(obj) = val.as_object_mut() {
-                        obj.insert("n_ctx".to_string(), serde_json::json!(context_length));
-                        rec.default_params_json = val.to_string();
-                        let _ = self.db.upsert_model(&rec);
-                    }
+                    rec.default_params.n_ctx = context_length;
+                    let _ = self.db.upsert_model(&rec);
                 }
 
                 self.refresh_controls_button();

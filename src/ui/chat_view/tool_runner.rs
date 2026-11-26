@@ -15,6 +15,7 @@ use crate::agent::web_search::{
     validate_fetch_url,
 };
 use crate::core::runtime;
+use crate::core::types::ToolCallStatus;
 use crate::i18n::{gettext, tr_f};
 use crate::storage::{Database, ToolCallRecord};
 use crate::ui::message_object::MessageObject;
@@ -52,14 +53,8 @@ pub(super) async fn run_chat_tool_call(
         d
     };
 
-    let decision_str = match decision {
-        PermissionDecision::Deny => "deny",
-        PermissionDecision::AllowOnce => "allow_once",
-        PermissionDecision::AllowChat => "allow_chat",
-    };
-
     let (status, output) = if decision == PermissionDecision::Deny {
-        ("denied".to_string(), "User denied permission.".to_string())
+        (ToolCallStatus::Denied, "User denied permission.".to_string())
     } else {
         stream_obj.set_status(Some(&tr_f("Running {tool}…", &[("tool", &call.name)])));
         let tname = call.name.clone();
@@ -88,9 +83,9 @@ pub(super) async fn run_chat_tool_call(
             let _ = ttx.send(execute_tool_with_grants(&grants, &tname, &targs));
         });
         match trx.await {
-            Ok(Ok(out)) => ("ok".to_string(), out),
-            Ok(Err(err)) => ("error".to_string(), err.to_string()),
-            Err(_) => ("error".to_string(), "Tool task cancelled".to_string()),
+            Ok(Ok(out)) => (ToolCallStatus::Ok, out),
+            Ok(Err(err)) => (ToolCallStatus::Error, err.to_string()),
+            Err(_) => (ToolCallStatus::Error, "Tool task cancelled".to_string()),
         }
     };
 
@@ -102,7 +97,7 @@ pub(super) async fn run_chat_tool_call(
             .unwrap_or_else(|_| call.arguments.to_string()),
         status,
         output: Some(output.clone()),
-        permission_decision: decision_str.to_string(),
+        permission_decision: decision,
         created_at: chrono::Utc::now().timestamp_millis(),
     };
 
@@ -128,17 +123,17 @@ pub(super) async fn run_web_search_call(
         .to_string();
 
     let global_enabled = db.get_web_search_global_enabled().unwrap_or(false);
-    let (status, output, decision_str) = if !global_enabled || !web_search_enabled {
+    let (status, output, decision) = if !global_enabled || !web_search_enabled {
         (
-            "denied".to_string(),
+            ToolCallStatus::Denied,
             "Web search is disabled for this chat.".to_string(),
-            "deny".to_string(),
+            PermissionDecision::Deny,
         )
     } else if proposed_query.is_empty() {
         (
-            "error".to_string(),
+            ToolCallStatus::Error,
             "Missing 'query' argument".to_string(),
-            "deny".to_string(),
+            PermissionDecision::Deny,
         )
     } else {
         let engine = db.get_search_engine().unwrap_or_default();
@@ -156,9 +151,9 @@ pub(super) async fn run_web_search_call(
         );
         match prx.await.unwrap_or(None) {
             None => (
-                "denied".to_string(),
+                ToolCallStatus::Denied,
                 "User denied web search.".to_string(),
-                "deny".to_string(),
+                PermissionDecision::Deny,
             ),
             Some(final_query) => {
                 stream_obj.set_status(Some(&tr_f(
@@ -172,12 +167,16 @@ pub(super) async fn run_web_search_call(
                     let _ = ttx.send(res);
                 });
                 match trx.await {
-                    Ok(Ok(out)) => ("ok".to_string(), out, "allow_once".to_string()),
-                    Ok(Err(err)) => ("error".to_string(), err.to_string(), "allow_once".to_string()),
+                    Ok(Ok(out)) => (ToolCallStatus::Ok, out, PermissionDecision::AllowOnce),
+                    Ok(Err(err)) => (
+                        ToolCallStatus::Error,
+                        err.to_string(),
+                        PermissionDecision::AllowOnce,
+                    ),
                     Err(_) => (
-                        "error".to_string(),
+                        ToolCallStatus::Error,
                         "Web search task cancelled".to_string(),
-                        "allow_once".to_string(),
+                        PermissionDecision::AllowOnce,
                     ),
                 }
             }
@@ -192,7 +191,7 @@ pub(super) async fn run_web_search_call(
             .unwrap_or_else(|_| call.arguments.to_string()),
         status,
         output: Some(output.clone()),
-        permission_decision: decision_str,
+        permission_decision: decision,
         created_at: chrono::Utc::now().timestamp_millis(),
     };
 
@@ -217,20 +216,24 @@ pub(super) async fn run_fetch_url_call(
         .to_string();
 
     let global_enabled = db.get_web_search_global_enabled().unwrap_or(false);
-    let (status, output, decision_str) = if !global_enabled || !web_search_enabled {
+    let (status, output, decision) = if !global_enabled || !web_search_enabled {
         (
-            "denied".to_string(),
+            ToolCallStatus::Denied,
             "Web search is disabled for this chat.".to_string(),
-            "deny".to_string(),
+            PermissionDecision::Deny,
         )
     } else if proposed_url.is_empty() {
         (
-            "error".to_string(),
+            ToolCallStatus::Error,
             "Missing 'url' argument".to_string(),
-            "deny".to_string(),
+            PermissionDecision::Deny,
         )
     } else if let Err(err) = validate_fetch_url(&proposed_url) {
-        ("error".to_string(), err.to_string(), "deny".to_string())
+        (
+            ToolCallStatus::Error,
+            err.to_string(),
+            PermissionDecision::Deny,
+        )
     } else {
         let warnings = inspect_fetch_url(&proposed_url, local_texts);
         let (ptx, prx) = tokio::sync::oneshot::channel();
@@ -239,13 +242,17 @@ pub(super) async fn run_fetch_url_call(
         });
         match prx.await.unwrap_or(None) {
             None => (
-                "denied".to_string(),
+                ToolCallStatus::Denied,
                 "User denied web page fetch.".to_string(),
-                "deny".to_string(),
+                PermissionDecision::Deny,
             ),
             Some(final_url) => {
                 if let Err(err) = validate_fetch_url(&final_url) {
-                    ("error".to_string(), err.to_string(), "deny".to_string())
+                    (
+                        ToolCallStatus::Error,
+                        err.to_string(),
+                        PermissionDecision::Deny,
+                    )
                 } else {
                     stream_obj.set_status(Some(&gettext("Fetching web page…")));
                     let (ttx, trx) = tokio::sync::oneshot::channel();
@@ -254,12 +261,16 @@ pub(super) async fn run_fetch_url_call(
                         let _ = ttx.send(res);
                     });
                     match trx.await {
-                        Ok(Ok(out)) => ("ok".to_string(), out, "allow_once".to_string()),
-                        Ok(Err(err)) => ("error".to_string(), err.to_string(), "allow_once".to_string()),
+                        Ok(Ok(out)) => (ToolCallStatus::Ok, out, PermissionDecision::AllowOnce),
+                        Ok(Err(err)) => (
+                            ToolCallStatus::Error,
+                            err.to_string(),
+                            PermissionDecision::AllowOnce,
+                        ),
                         Err(_) => (
-                            "error".to_string(),
+                            ToolCallStatus::Error,
                             "Fetch task cancelled".to_string(),
-                            "allow_once".to_string(),
+                            PermissionDecision::AllowOnce,
                         ),
                     }
                 }
@@ -275,7 +286,7 @@ pub(super) async fn run_fetch_url_call(
             .unwrap_or_else(|_| call.arguments.to_string()),
         status,
         output: Some(output.clone()),
-        permission_decision: decision_str,
+        permission_decision: decision,
         created_at: chrono::Utc::now().timestamp_millis(),
     };
 

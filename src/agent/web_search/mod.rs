@@ -9,46 +9,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::i18n::gettext;
-
 use html_parse::{extract_readable_text, parse_duckduckgo_html};
 use privacy_guard::{MAX_QUERY_CHARS, is_public_ip};
 
+pub use crate::core::types::SearchEngine;
 pub use privacy_guard::{inspect_fetch_url, inspect_search_query, validate_fetch_url};
 
 pub(super) const MAX_RESULTS: usize = 6;
 const MAX_FETCH_BYTES: usize = 512 * 1024;
 const MAX_FETCH_TEXT_CHARS: usize = 12_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SearchEngine {
-    #[default]
-    DuckDuckGo,
-    SearXNG,
-}
-
-impl SearchEngine {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::DuckDuckGo => "duckduckgo",
-            Self::SearXNG => "searxng",
-        }
-    }
-
-    pub fn from_str_lossy(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "searxng" => Self::SearXNG,
-            _ => Self::DuckDuckGo,
-        }
-    }
-
-    pub fn label(self) -> String {
-        match self {
-            Self::DuckDuckGo => gettext("DuckDuckGo"),
-            Self::SearXNG => gettext("SearXNG"),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {

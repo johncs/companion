@@ -28,13 +28,12 @@ pub(super) fn parse_uri_list_paths(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Extract `n_ctx` from the active model's `default_params_json`, defaulting to `4096`.
+/// Extract `n_ctx` from the active model's typed `default_params`, defaulting to `4096`.
 pub(super) fn extract_model_n_ctx(models: &[ModelRecord], active_model_id: Option<&str>) -> u32 {
     active_model_id
         .and_then(|id| models.iter().find(|m| m.id == id))
-        .and_then(|m| serde_json::from_str::<serde_json::Value>(&m.default_params_json).ok())
-        .and_then(|v| v.get("n_ctx").and_then(|n| n.as_u64()))
-        .unwrap_or(4096) as u32
+        .map(|m| m.default_params.n_ctx)
+        .unwrap_or(4096)
 }
 
 /// Compute clamped context usage percentage (`0..=100`).
@@ -272,36 +271,26 @@ mod tests {
     }
 
     #[test]
-    fn extract_model_n_ctx_reads_json_and_falls_back_to_default() {
-        let models = vec![
-            ModelRecord {
-                id: "m1".into(),
-                display_name: "M1".into(),
-                provider_type: "llama_cpp".into(),
-                file_path: None,
-                mmproj_path: None,
-                hf_repo: None,
-                quantization: None,
-                supports_thinking: false,
-                default_params_json: r#"{"n_ctx": 16384}"#.into(),
-                avg_tokens_per_sec: None,
+    fn extract_model_n_ctx_reads_typed_params_and_falls_back() {
+        use crate::core::model_params::ModelParams;
+
+        let models = vec![ModelRecord {
+            id: "m1".into(),
+            display_name: "M1".into(),
+            provider_type: "llama_cpp".into(),
+            file_path: None,
+            mmproj_path: None,
+            hf_repo: None,
+            quantization: None,
+            supports_thinking: false,
+            default_params: ModelParams {
+                n_ctx: 16384,
+                ..ModelParams::default()
             },
-            ModelRecord {
-                id: "m2".into(),
-                display_name: "M2".into(),
-                provider_type: "llama_cpp".into(),
-                file_path: None,
-                mmproj_path: None,
-                hf_repo: None,
-                quantization: None,
-                supports_thinking: false,
-                default_params_json: "not-json".into(),
-                avg_tokens_per_sec: None,
-            },
-        ];
+            avg_tokens_per_sec: None,
+        }];
 
         assert_eq!(extract_model_n_ctx(&models, Some("m1")), 16384);
-        assert_eq!(extract_model_n_ctx(&models, Some("m2")), 4096);
         assert_eq!(extract_model_n_ctx(&models, None), 4096);
     }
 }

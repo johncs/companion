@@ -8,6 +8,7 @@ mod repo_rows;
 mod starter_models;
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -33,8 +34,17 @@ pub fn build_explore_subpage(
     hw: HardwareInfo,
     refresh_installed: Rc<dyn Fn()>,
     tracker: DownloadTracker,
+    models_dir: PathBuf,
 ) -> adw::NavigationPage {
-    build_explore_subpage_with_query(dialog, db, hw, refresh_installed, tracker, None)
+    build_explore_subpage_with_query(
+        dialog,
+        db,
+        hw,
+        refresh_installed,
+        tracker,
+        models_dir,
+        None,
+    )
 }
 
 /// Build the "Explore AI Models" subpage optionally pre-populated with an initial search query.
@@ -44,6 +54,7 @@ pub fn build_explore_subpage_with_query(
     hw: HardwareInfo,
     refresh_installed: Rc<dyn Fn()>,
     tracker: DownloadTracker,
+    models_dir: PathBuf,
     initial_query: Option<&str>,
 ) -> adw::NavigationPage {
     let toolbar_view = adw::ToolbarView::new();
@@ -81,6 +92,7 @@ pub fn build_explore_subpage_with_query(
         hw,
         refresh_installed,
         tracker,
+        models_dir,
     );
 
     page.add(&discover_group);
@@ -117,6 +129,7 @@ fn build_search_runner(
     hw: HardwareInfo,
     refresh_installed: Rc<dyn Fn()>,
     tracker: DownloadTracker,
+    models_dir: PathBuf,
 ) -> Rc<dyn Fn(String)> {
     let search_weak: Rc<RefCell<Option<Rc<dyn Fn(String)>>>> = Rc::new(RefCell::new(None));
     let search_weak_inner = search_weak.clone();
@@ -142,6 +155,7 @@ fn build_search_runner(
         let refresh_installed = refresh_installed.clone();
         let tracker = tracker.clone();
         let search_weak_inner = search_weak_inner.clone();
+        let models_dir = models_dir.clone();
 
         glib::MainContext::default().spawn_local(async move {
             let res = rx.await;
@@ -163,6 +177,7 @@ fn build_search_runner(
                             &dialog,
                             &refresh_installed,
                             &tracker,
+                            models_dir.clone(),
                         ));
                     }
                 }

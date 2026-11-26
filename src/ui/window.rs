@@ -3,6 +3,7 @@
 use adw::prelude::*;
 use relm4::prelude::*;
 
+use crate::core::paths::AppPaths;
 use crate::i18n::gettext;
 use crate::storage::{Conversation, Database, ModelRecord};
 use crate::ui::chat_view::{ChatViewModel, ChatViewMsg, ChatViewOutput};
@@ -11,6 +12,7 @@ use crate::ui::sidebar::{SidebarModel, SidebarMsg, SidebarOutput};
 
 pub struct MainWindow {
     db: Database,
+    paths: AppPaths,
     sidebar: Controller<SidebarModel>,
     chat_view: Controller<ChatViewModel>,
     active_conversation: Option<Conversation>,
@@ -39,7 +41,7 @@ pub enum MainWindowMsg {
 
 #[relm4::component(pub)]
 impl SimpleComponent for MainWindow {
-    type Init = Database;
+    type Init = (Database, AppPaths);
     type Input = MainWindowMsg;
     type Output = ();
 
@@ -130,7 +132,7 @@ impl SimpleComponent for MainWindow {
     }
 
     fn init(
-        db: Self::Init,
+        (db, paths): Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
@@ -197,6 +199,7 @@ impl SimpleComponent for MainWindow {
 
         let model = Self {
             db,
+            paths,
             sidebar,
             chat_view,
             active_conversation: None,
@@ -288,6 +291,7 @@ impl MainWindow {
         present_settings_dialog(
             &self.toast_overlay,
             self.db.clone(),
+            self.paths.models_dir.clone(),
             active_id,
             initial_page,
             move |new_id| {

@@ -3,8 +3,23 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use gtk::glib;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+/// Escape XML/Pango markup special characters (`&`, `<`, `>`, `"`, `'`) in pure Rust.
+pub fn escape_pango_markup(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -109,7 +124,7 @@ fn parse_markdown_blocks_impl(
                         && !input[range.start..range.end].trim_end().ends_with("```")
                         && !input[range.start..range.end].trim_end().ends_with("~~~");
                     let (light_pango_markup, dark_pango_markup) = if is_unclosed_eof {
-                        let escaped = glib::markup_escape_text(&code).to_string();
+                        let escaped = escape_pango_markup(&code);
                         (escaped.clone(), escaped)
                     } else {
                         let key = (lang.clone(), code.clone());
@@ -327,17 +342,17 @@ fn parse_markdown_blocks_impl(
                 target.push_str(if checked { "☑  " } else { "☐  " });
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
-                let escaped = glib::markup_escape_text(&dest_url);
+                let escaped = escape_pango_markup(&dest_url);
                 target.push_str(&format!("<a href=\"{escaped}\">"));
                 open_tags.push("</a>");
             }
             Event::End(TagEnd::Link) => pop_tag(target, &mut open_tags, "</a>"),
             Event::Code(inline) => {
-                let escaped = glib::markup_escape_text(&inline);
+                let escaped = escape_pango_markup(&inline);
                 target.push_str(&format!("<tt><span size=\"94%\">{escaped}</span></tt>"));
             }
             Event::Text(t) => {
-                target.push_str(&glib::markup_escape_text(&t));
+                target.push_str(&escape_pango_markup(&t));
             }
             Event::Html(raw) | Event::InlineHtml(raw) => {
                 let trimmed = raw.trim();
@@ -347,7 +362,7 @@ fn parse_markdown_blocks_impl(
                 {
                     target.push('\n');
                 } else {
-                    target.push_str(&glib::markup_escape_text(&raw));
+                    target.push_str(&escape_pango_markup(&raw));
                 }
             }
             Event::SoftBreak => target.push(' '),
@@ -388,9 +403,7 @@ fn parse_markdown_blocks_impl(
     }
 
     if blocks.is_empty() && !input.trim().is_empty() {
-        blocks.push(MarkdownBlock::Text(
-            glib::markup_escape_text(input.trim()).to_string(),
-        ));
+        blocks.push(MarkdownBlock::Text(escape_pango_markup(input.trim())));
     }
 
     blocks
@@ -456,7 +469,7 @@ pub fn highlight_code_pango(code: &str, language: Option<&str>, theme_name: &str
                 }
             }
             Err(_) => {
-                out.push_str(&glib::markup_escape_text(line));
+                out.push_str(&escape_pango_markup(line));
             }
         }
     }
@@ -465,7 +478,7 @@ pub fn highlight_code_pango(code: &str, language: Option<&str>, theme_name: &str
 }
 
 fn append_styled_span(out: &mut String, style: Style, text: &str) {
-    let escaped = glib::markup_escape_text(text);
+    let escaped = escape_pango_markup(text);
     let fg = style.foreground;
     out.push_str(&format!(
         "<span foreground=\"#{:02x}{:02x}{:02x}\">{escaped}</span>",
@@ -584,5 +597,14 @@ mod tests {
         assert_eq!(format_code_language(Some("  python ")), "Python");
         assert_eq!(format_code_language(None), "Text");
         assert_eq!(format_code_language(Some("")), "Text");
+    }
+
+    #[test]
+    fn escapes_pango_markup_special_chars_and_unicode() {
+        assert_eq!(escape_pango_markup(""), "");
+        assert_eq!(
+            escape_pango_markup(r#"a & b <tag> "q" 's' 🚀"#),
+            "a &amp; b &lt;tag&gt; &quot;q&quot; &apos;s&apos; 🚀"
+        );
     }
 }

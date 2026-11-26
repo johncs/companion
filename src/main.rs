@@ -26,18 +26,24 @@ fn main() {
 
     i18n::init();
 
-    let db_path = glib::user_data_dir().join("companion").join("companion.db");
-    match storage::Database::open(&db_path) {
+    let paths = core::paths::AppPaths::from_data_dir(glib::user_data_dir());
+    match storage::Database::open(&paths.db_path) {
         Ok(db) => {
-            if let Err(err) = db.sync_managed_models(&models::managed_models_dir()) {
+            if db.get_setting("user_name").ok().flatten().is_none() {
+                let real = glib::real_name().to_string_lossy().trim().to_string();
+                if !real.is_empty() && real != "Unknown" {
+                    let _ = db.set_user_name(&real);
+                }
+            }
+            if let Err(err) = db.sync_managed_models(&paths.models_dir) {
                 tracing::warn!("Failed to synchronize managed models: {err}");
             }
             let app = RelmApp::new(APP_ID);
-            app.run::<ui::window::MainWindow>(db);
+            app.run::<ui::window::MainWindow>((db, paths));
         }
         Err(err) => {
             tracing::error!("Database initialization failed: {err}");
-            show_startup_error(&db_path, &err.to_string());
+            show_startup_error(&paths.db_path, &err.to_string());
         }
     }
 }

@@ -11,14 +11,17 @@ use tokio::sync::mpsc;
 
 use crate::agent::parser::{parse_tool_calls, strip_tool_calls};
 use crate::agent::tools::GrantedFolder;
+use crate::core::types::{
+    ExecutionDevice, FolderPermission, MessageRole, PermissionDecision, ToolCallStatus,
+};
 use crate::core::{ThinkingLevel, runtime};
 use crate::i18n::tr_f;
-use crate::inference::provider::{ChatEvent, ChatRole, ChatTurn, ModelProvider};
-use crate::storage::{ModelRecord, ToolCallRecord};
+use crate::inference::provider::{ChatEvent, ChatRole, ChatTurn, InferenceParams, ModelProvider};
+use crate::storage::{ModelRecord, NewMessage, ToolCallRecord};
 use crate::ui::composer::ComposerMsg;
 use crate::ui::message_object::MessageObject;
 
-use super::page_loader::{maybe_scroll_bottom, parse_model_params};
+use super::page_loader::maybe_scroll_bottom;
 use super::stream::{ActiveChatRun, StreamStepUpdate, spawn_stream_coalescer};
 use super::tool_runner::{run_chat_tool_call, run_fetch_url_call, run_web_search_call};
 use super::{ChatViewModel, ChatViewMsg, ChatViewOutput};
@@ -37,15 +40,23 @@ impl ChatViewModel {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.composer.emit(ComposerMsg::SetGenerating(true));
 
-        let mut base_params = parse_model_params(&model_record.default_params_json);
-        base_params.thinking_level = thinking_level;
-        base_params.mmproj_path = model_record.mmproj_path.clone();
-        // Let replies use up to the configured context window (bounded by `pos >= ctx_size`).
-        base_params.max_tokens = base_params.max_tokens.max(base_params.n_ctx);
+        let base_params = InferenceParams {
+            n_ctx: model_record.default_params.n_ctx,
+            n_gpu_layers: model_record.default_params.n_gpu_layers,
+            // Let replies use up to the configured context window (bounded by `pos >= ctx_size`).
+            max_tokens: model_record
+                .default_params
+                .max_tokens
+                .max(model_record.default_params.n_ctx),
+            temperature: model_record.default_params.temperature,
+            thinking_level,
+            mmproj_path: model_record.mmproj_path.clone(),
+            ..InferenceParams::default()
+        };
         let execution_device = if base_params.n_gpu_layers > 0 {
-            "gpu"
+            ExecutionDevice::Gpu
         } else {
-            "cpu"
+            ExecutionDevice::Cpu
         };
 
         let model_display_name = crate::models::friendly_model_name(&model_record.display_name);
@@ -53,7 +64,7 @@ impl ChatViewModel {
             uuid::Uuid::new_v4().to_string(),
             Some(thinking_level.as_str().to_string()),
             Some(model_display_name.clone()),
-            Some(execution_device.to_string()),
+            Some(execution_device.as_str().to_string()),
             chrono::Utc::now().timestamp_millis(),
         );
         self.store.append(&stream_obj);
@@ -84,7 +95,7 @@ impl ChatViewModel {
             if p.exists() {
                 granted_folders.push(GrantedFolder {
                     path: p,
-                    allow_write: f.permission_mode == "read_write",
+                    allow_write: f.permission_mode.allows_write(),
                 });
             } else {
                 let _ = sender.output(ChatViewOutput::ShowToast(tr_f(
@@ -224,7 +235,7 @@ impl ChatViewModel {
                     {
                         let mut local_texts: Vec<String> = recorded_tools
                             .iter()
-                            .filter(|t| t.tool_name == "read_file" && t.status == "ok")
+                            .filter(|t| t.tool_name == "read_file" && t.status == ToolCallStatus::Ok)
                             .filter_map(|t| t.output.clone())
                             .collect();
                         for t in &turns {
@@ -266,7 +277,7 @@ impl ChatViewModel {
                         .await
                     };
                     let tool_name = tc.tool_name.clone();
-                    if tc.permission_decision == "allow_chat" {
+                    if tc.permission_decision == PermissionDecision::AllowChat {
                         let needs_write = matches!(
                             tool_name.as_str(),
                             "write_file" | "create_directory" | "move_path"
@@ -284,7 +295,7 @@ impl ChatViewModel {
                             {
                                 let _ = db.set_conversation_folder_permission(
                                     &entry.id,
-                                    "read_write",
+                                    FolderPermission::ReadWrite,
                                 );
                             }
                         } else {
@@ -296,7 +307,7 @@ impl ChatViewModel {
                                     gf.allow_write = true;
                                     let _ = db.set_conversation_folder_permission(
                                         &entry.id,
-                                        "read_write",
+                                        FolderPermission::ReadWrite,
                                     );
                                 }
                             }
@@ -355,17 +366,17 @@ impl ChatViewModel {
                     maybe_scroll_bottom(&scroller);
                 }
 
-                if let Ok(saved) = db.insert_message_with_metrics(
-                    &conv_id,
-                    "assistant",
-                    &full_answer,
-                    r_opt,
-                    Some(thinking_level.as_str()),
-                    Some(&model_display_name),
-                    Some(execution_device),
-                    total_completion_tokens,
-                    Some(elapsed_ms),
-                ) {
+                if let Ok(saved) = db.insert_message(NewMessage {
+                    conversation_id: &conv_id,
+                    role: MessageRole::Assistant,
+                    content: &full_answer,
+                    reasoning_content: r_opt,
+                    thinking_level: Some(thinking_level),
+                    model_name: Some(&model_display_name),
+                    execution_device: Some(execution_device),
+                    token_count: total_completion_tokens,
+                    generation_ms: Some(elapsed_ms),
+                }) {
                     for mut tc in recorded_tools {
                         tc.message_id = saved.id.clone();
                         let _ = db.insert_tool_call(&tc);

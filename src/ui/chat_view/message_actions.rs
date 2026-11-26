@@ -8,9 +8,10 @@ use adw::prelude::*;
 use gtk::glib;
 use relm4::prelude::*;
 
+use crate::core::types::{FolderPermission, MessageRole};
 use crate::core::{ThinkingLevel, runtime};
 use crate::i18n::{gettext, tr_f};
-use crate::storage::{AttachmentRecord, ModelRecord};
+use crate::storage::{AttachmentRecord, ModelRecord, NewMessage};
 use crate::ui::composer::ComposerMsg;
 use crate::ui::message_object::MessageObject;
 use crate::ui::permission_dialog::{FolderDropGrantChoice, present_folder_drop_confirm_dialog};
@@ -55,7 +56,10 @@ impl ChatViewModel {
                 match db.add_conversation_folder(&conv_id, &folder_str_cb) {
                     Ok(entry) => {
                         if allow_write {
-                            let _ = db.set_conversation_folder_permission(&entry.id, "read_write");
+                            let _ = db.set_conversation_folder_permission(
+                                &entry.id,
+                                FolderPermission::ReadWrite,
+                            );
                         }
                         sender_clone.input(ChatViewMsg::RefreshGrantedFolders);
                         let msg = if allow_write {
@@ -97,13 +101,17 @@ impl ChatViewModel {
             return;
         };
 
-        match self.db.insert_message(
-            &conv_id,
-            "user",
-            &text,
-            None,
-            Some(thinking_level.as_str()),
-        ) {
+        match self.db.insert_message(NewMessage {
+            conversation_id: &conv_id,
+            role: MessageRole::User,
+            content: &text,
+            reasoning_content: None,
+            thinking_level: Some(thinking_level),
+            model_name: None,
+            execution_device: None,
+            token_count: 0,
+            generation_ms: None,
+        }) {
             Ok(user_msg) => {
                 if let Err(err) = self.db.insert_attachments(&user_msg.id, &attachments) {
                     tracing::warn!("Failed to persist attachments: {err}");

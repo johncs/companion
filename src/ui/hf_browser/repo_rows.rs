@@ -1,6 +1,7 @@
 //! Hugging Face repository expander rows and individual GGUF file rows.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -23,6 +24,7 @@ pub(super) fn build_hf_repo_row(
     dialog: &adw::PreferencesDialog,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
 ) -> adw::ExpanderRow {
     let expander = adw::ExpanderRow::builder()
         .title(&repo.id)
@@ -70,6 +72,7 @@ pub(super) fn build_hf_repo_row(
         let dialog = dialog.clone();
         let refresh_installed = refresh_installed.clone();
         let tracker = tracker.clone();
+        let models_dir = models_dir.clone();
 
         let loaded_flag = loaded.clone();
         glib::MainContext::default().spawn_local(async move {
@@ -88,6 +91,7 @@ pub(super) fn build_hf_repo_row(
                         &dialog,
                         &refresh_installed,
                         &tracker,
+                        &models_dir,
                     );
                 }
                 Ok(Err(err)) => {
@@ -117,6 +121,7 @@ fn populate_repo_files(
     dialog: &adw::PreferencesDialog,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: &PathBuf,
 ) {
     let mut mmproj_file: Option<HfGgufFile> = None;
     let mut model_files: Vec<HfGgufFile> = Vec::with_capacity(files.len());
@@ -141,6 +146,7 @@ fn populate_repo_files(
                 dialog,
                 refresh_installed,
                 tracker,
+                models_dir.clone(),
             ));
         }
         return;
@@ -156,6 +162,7 @@ fn populate_repo_files(
             dialog,
             refresh_installed,
             tracker,
+            models_dir.clone(),
         ));
     }
 }
@@ -170,6 +177,7 @@ fn build_hf_file_row(
     dialog: &adw::PreferencesDialog,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
 ) -> adw::ActionRow {
     let quant = infer_quantization(&file.filename).unwrap_or_else(|| "GGUF".to_string());
     let fit = assess_model_fit(file.size_bytes, hw.total_ram_bytes);
@@ -238,6 +246,7 @@ fn build_hf_file_row(
                 &dialog,
                 &refresh_installed,
                 &tracker,
+                models_dir.clone(),
             );
         });
     }

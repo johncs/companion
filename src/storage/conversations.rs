@@ -5,6 +5,9 @@ use chrono::Utc;
 use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
+use crate::core::ThinkingLevel;
+use crate::core::types::FolderPermission;
+
 use super::Database;
 use super::entities::Conversation;
 
@@ -106,9 +109,7 @@ impl Database {
             .flatten()
             .and_then(|id| self.get_model(&id).ok().flatten())
             .map(|m| m.default_thinking_level())
-            .unwrap_or_default()
-            .as_str()
-            .to_string();
+            .unwrap_or_default();
         let conv = Conversation {
             id: Uuid::new_v4().to_string(),
             title: title.trim().to_string(),
@@ -134,7 +135,7 @@ impl Database {
                 conv.created_at,
                 conv.updated_at,
                 conv.system_prompt,
-                conv.thinking_level,
+                conv.thinking_level.as_str(),
                 conv.web_search_enabled as i64,
             ],
         )?;
@@ -152,11 +153,15 @@ impl Database {
     }
 
     /// Persist the selected thinking level for a conversation.
-    pub fn set_conversation_thinking_level(&self, id: &str, thinking_level: &str) -> Result<()> {
+    pub fn set_conversation_thinking_level(
+        &self,
+        id: &str,
+        thinking_level: ThinkingLevel,
+    ) -> Result<()> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         conn.execute(
             "UPDATE conversations SET thinking_level = ?1 WHERE id = ?2",
-            params![thinking_level, id],
+            params![thinking_level.as_str(), id],
         )?;
         Ok(())
     }
@@ -212,7 +217,7 @@ impl Database {
             model_id: source.model_id.clone(),
             persona_id: source.persona_id.clone(),
             system_prompt: source.system_prompt.clone(),
-            thinking_level: source.thinking_level.clone(),
+            thinking_level: source.thinking_level,
             web_search_enabled: source.web_search_enabled,
             pinned: false,
             created_at: now,
@@ -232,7 +237,7 @@ impl Database {
                 copy.created_at,
                 copy.updated_at,
                 copy.system_prompt,
-                copy.thinking_level,
+                copy.thinking_level.as_str(),
                 copy.web_search_enabled as i64,
             ],
         )?;
@@ -326,11 +331,12 @@ impl Database {
                  WHERE conversation_id = ?1 AND folder_path = ?2",
                 params![conversation_id, folder_path],
                 |row| {
+                    let mode_raw: String = row.get(3)?;
                     Ok(super::entities::ConversationFolder {
                         id: row.get(0)?,
                         conversation_id: row.get(1)?,
                         folder_path: row.get(2)?,
-                        permission_mode: row.get(3)?,
+                        permission_mode: FolderPermission::from_str_lossy(&mode_raw),
                         created_at: row.get(4)?,
                     })
                 },
@@ -344,7 +350,7 @@ impl Database {
             id: Uuid::new_v4().to_string(),
             conversation_id: conversation_id.to_string(),
             folder_path: folder_path.to_string(),
-            permission_mode: "read".to_string(),
+            permission_mode: FolderPermission::Read,
             created_at: Utc::now().timestamp_millis(),
         };
         conn.execute(
@@ -354,7 +360,7 @@ impl Database {
                 entry.id,
                 entry.conversation_id,
                 entry.folder_path,
-                entry.permission_mode,
+                entry.permission_mode.as_str(),
                 entry.created_at,
             ],
         )?;
@@ -374,32 +380,28 @@ impl Database {
              ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], |row| {
+            let mode_raw: String = row.get(3)?;
             Ok(super::entities::ConversationFolder {
                 id: row.get(0)?,
                 conversation_id: row.get(1)?,
                 folder_path: row.get(2)?,
-                permission_mode: row.get(3)?,
+                permission_mode: FolderPermission::from_str_lossy(&mode_raw),
                 created_at: row.get(4)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
-    /// Update a granted folder's permission mode (`"read"` or `"read_write"`).
+    /// Update a granted folder's permission mode (`FolderPermission::Read` or `ReadWrite`).
     pub fn set_conversation_folder_permission(
         &self,
         id: &str,
-        permission_mode: &str,
+        permission_mode: FolderPermission,
     ) -> Result<()> {
-        let normalized = if permission_mode == "read_write" {
-            "read_write"
-        } else {
-            "read"
-        };
         let conn = self.conn.lock().expect("database mutex poisoned");
         conn.execute(
             "UPDATE conversation_folders SET permission_mode = ?1 WHERE id = ?2",
-            params![normalized, id],
+            params![permission_mode.as_str(), id],
         )?;
         Ok(())
     }
@@ -451,6 +453,7 @@ impl Database {
 
 fn map_conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
     let pinned: i64 = row.get(4)?;
+    let thinking_raw: String = row.get(8)?;
     let web_search: i64 = row.get(9)?;
     Ok(Conversation {
         id: row.get(0)?,
@@ -461,7 +464,7 @@ fn map_conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
         system_prompt: row.get(7)?,
-        thinking_level: row.get(8)?,
+        thinking_level: ThinkingLevel::from_str_lossy(&thinking_raw),
         web_search_enabled: web_search != 0,
     })
 }

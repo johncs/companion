@@ -37,18 +37,9 @@ pub fn present_model_config_dialog(
     header.pack_end(&save_btn);
     toolbar.add_top_bar(&header);
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&model.default_params_json).unwrap_or_default();
-    let init_ctx = parsed.get("n_ctx").and_then(|v| v.as_u64()).unwrap_or(4096) as u32;
-    let init_gpu_enabled = parsed
-        .get("n_gpu_layers")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(99)
-        > 0;
-    let init_temp = parsed
-        .get("temperature")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(1.0);
+    let init_ctx = model.default_params.n_ctx;
+    let init_gpu_enabled = model.default_params.n_gpu_layers > 0;
+    let init_temp = f64::from(model.default_params.temperature);
     let init_thinking = model.default_thinking_level();
     let init_thinking_idx = ThinkingLevel::ALL
         .iter()
@@ -230,17 +221,16 @@ pub fn present_model_config_dialog(
                 .copied()
                 .unwrap_or(4096);
             let n_gpu_layers: u32 = if gpu_row.is_active() { 99 } else { 0 };
-            let params_json = serde_json::json!({
-                "n_ctx": selected_ctx,
-                "n_gpu_layers": n_gpu_layers,
-                "temperature": (temp_row.value() * 100.0).round() / 100.0,
-                "thinking_level": ThinkingLevel::from_index(thinking_row.selected()).as_str(),
-            })
-            .to_string();
 
             let mut updated = model.clone();
             updated.supports_thinking = detected_thinking;
-            updated.default_params_json = params_json;
+            updated.default_params = crate::core::model_params::ModelParams {
+                n_ctx: selected_ctx,
+                n_gpu_layers,
+                max_tokens: model.default_params.max_tokens,
+                temperature: (((temp_row.value() * 100.0).round() / 100.0) as f32),
+                thinking_level: ThinkingLevel::from_index(thinking_row.selected()),
+            };
 
             if let Err(err) = db.upsert_model(&updated) {
                 parent_dialog.add_toast(adw::Toast::new(&tr_f(

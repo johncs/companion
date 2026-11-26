@@ -1,7 +1,7 @@
 //! Vision projector (`mmproj`) discovery, confirmation, and manual file selection dialogs.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -57,6 +57,7 @@ pub(super) fn lookup_and_enable_vision(
     model: ModelRecord,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
 ) {
     btn.set_sensitive(false);
     controls.pct_label.set_text("");
@@ -123,10 +124,20 @@ pub(super) fn lookup_and_enable_vision(
                     matched,
                     &refresh,
                     &tracker,
+                    models_dir.clone(),
                 );
             }
             Ok(Ok(None)) => {
-                present_manual_vision_guide(&dialog_ref, &db, &hw, model, &refresh, &tracker, None);
+                present_manual_vision_guide(
+                    &dialog_ref,
+                    &db,
+                    &hw,
+                    model,
+                    &refresh,
+                    &tracker,
+                    models_dir.clone(),
+                    None,
+                );
             }
             Ok(Err(err)) => {
                 present_manual_vision_guide(
@@ -136,6 +147,7 @@ pub(super) fn lookup_and_enable_vision(
                     model,
                     &refresh,
                     &tracker,
+                    models_dir.clone(),
                     Some(err),
                 );
             }
@@ -157,6 +169,7 @@ fn present_matched_vision_confirm(
     matched: MmprojMatch,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
 ) {
     let size_label = format_bytes(matched.file.size_bytes);
     let model_name = friendly_model_name(&model.display_name);
@@ -204,6 +217,7 @@ fn present_matched_vision_confirm(
                 matched.repo_id.clone(),
                 Some(matched.file.clone()),
                 &refresh,
+                models_dir.clone(),
             );
         }
         "other" => {
@@ -214,6 +228,7 @@ fn present_matched_vision_confirm(
                 model.clone(),
                 &refresh,
                 &tracker,
+                models_dir.clone(),
                 None,
             );
         }
@@ -230,6 +245,7 @@ fn present_manual_vision_guide(
     model: ModelRecord,
     refresh_installed: &Rc<dyn Fn()>,
     tracker: &DownloadTracker,
+    models_dir: PathBuf,
     lookup_error: Option<String>,
 ) {
     if let Some(err) = lookup_error {
@@ -304,6 +320,7 @@ fn present_manual_vision_guide(
                 hw.clone(),
                 refresh.clone(),
                 tracker.clone(),
+                models_dir.clone(),
                 Some(&query),
             );
             dialog_ref.push_subpage(&subpage);

@@ -6,13 +6,6 @@ pub mod huggingface;
 
 use std::path::{Path, PathBuf};
 
-use gtk::glib;
-
-/// Directory where Companion stores downloaded GGUF models.
-pub fn managed_models_dir() -> PathBuf {
-    glib::user_data_dir().join("companion").join("models")
-}
-
 /// Format a byte count into a human-readable string (e.g., `4.37 GB`).
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
@@ -158,7 +151,7 @@ pub fn friendly_model_name(raw: &str) -> String {
     }
 }
 
-/// A GGUF model discovered on disk inside [`managed_models_dir()`].
+/// A GGUF model discovered on disk inside the configured models directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredModel {
     pub display_name: String,

@@ -239,7 +239,7 @@ fn populate_grant_group(
         ]);
         let perm_dropdown = gtk::DropDown::builder()
             .model(&perm_model)
-            .selected(if entry.permission_mode == "read_write" {
+            .selected(if entry.permission_mode.allows_write() {
                 1
             } else {
                 0
@@ -254,9 +254,9 @@ fn populate_grant_group(
             let on_changed = on_changed.clone();
             perm_dropdown.connect_selected_notify(move |dd| {
                 let mode = if dd.selected() == 1 {
-                    "read_write"
+                    crate::core::types::FolderPermission::ReadWrite
                 } else {
-                    "read"
+                    crate::core::types::FolderPermission::Read
                 };
                 if let Err(err) = db.set_conversation_folder_permission(&fid, mode) {
                     toast_overlay.add_toast(adw::Toast::new(&tr_f(
@@ -381,7 +381,7 @@ mod tests {
             id: "1".to_string(),
             conversation_id: "c1".to_string(),
             folder_path: path.to_string_lossy().to_string(),
-            permission_mode: "read".to_string(),
+            permission_mode: crate::core::types::FolderPermission::Read,
             created_at: 0,
         }
     }
