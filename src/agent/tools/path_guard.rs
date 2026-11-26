@@ -12,6 +12,19 @@ pub struct GrantedFolder {
     pub allow_write: bool,
 }
 
+/// Shared argument aliases for file/path tools.
+pub const PATH_ALIASES: &[&str] = &["path", "file_path", "filepath", "file"];
+/// Shared argument aliases for directory tools.
+pub const DIR_ALIASES: &[&str] = &["path", "directory"];
+/// Shared argument aliases for `list_files`.
+pub const LIST_ALIASES: &[&str] = &["subdir", "path", "directory"];
+
+/// Return the first non-null string argument matching any key in `keys`.
+pub fn first_str_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+}
+
 /// Resolve `rel_path` strictly inside `granted_root`, rejecting any `..` or outside symlink escape.
 pub fn resolve_granted_path(granted_root: &Path, rel_path: &str) -> Result<PathBuf> {
     let root_canon = fs::canonicalize(granted_root)
@@ -74,45 +87,48 @@ pub(super) fn sanitize_tool_path(raw: &str) -> &str {
 }
 
 /// If a tool call targets an existing absolute path outside `granted_folders`, return its canonical path.
+#[cfg(test)]
 pub fn requested_ungranted_path(
     granted_folders: &[GrantedFolder],
     tool_name: &str,
     args: &Value,
 ) -> Option<PathBuf> {
-    let raw_path = match tool_name {
-        "read_file" | "delete_file" => args
-            .get("root")
-            .and_then(|v| v.as_str())
-            .or_else(|| args.get("path").and_then(|v| v.as_str()))
-            .or_else(|| args.get("file_path").and_then(|v| v.as_str()))
-            .or_else(|| args.get("filepath").and_then(|v| v.as_str()))
-            .or_else(|| args.get("file").and_then(|v| v.as_str())),
-        "write_file" | "create_directory" | "delete_directory" => args
-            .get("root")
-            .and_then(|v| v.as_str())
-            .or_else(|| args.get("path").and_then(|v| v.as_str()))
-            .or_else(|| args.get("directory").and_then(|v| v.as_str())),
-        "move_path" => args.get("root").and_then(|v| v.as_str()),
-        "list_files" => args
-            .get("root")
-            .and_then(|v| v.as_str())
-            .or_else(|| args.get("subdir").and_then(|v| v.as_str()))
-            .or_else(|| args.get("path").and_then(|v| v.as_str()))
-            .or_else(|| args.get("directory").and_then(|v| v.as_str())),
-        "search_files" => args.get("root").and_then(|v| v.as_str()),
-        _ => None,
-    }?;
+    let raw_path = extract_raw_target_path(tool_name, args);
+    let require_write = matches!(
+        tool_name,
+        "write_file" | "delete_file" | "create_directory" | "move_path" | "delete_directory"
+    );
+    resolve_ungranted_raw(granted_folders, raw_path, require_write)
+}
 
+/// Shared raw target-path extraction used by `requested_ungranted_path` and `Tool::raw_target_path`.
+pub fn extract_raw_target_path<'a>(tool_name: &str, args: &'a Value) -> Option<&'a str> {
+    let root = first_str_arg(args, &["root"]);
+    match tool_name {
+        "read_file" | "delete_file" => root.or_else(|| first_str_arg(args, PATH_ALIASES)),
+        "write_file" => root.or_else(|| first_str_arg(args, PATH_ALIASES)),
+        "create_directory" | "delete_directory" => {
+            root.or_else(|| first_str_arg(args, DIR_ALIASES))
+        }
+        "move_path" | "search_files" => root,
+        "list_files" => root.or_else(|| first_str_arg(args, LIST_ALIASES)),
+        _ => None,
+    }
+}
+
+/// Resolve an ungranted canonical path from a raw path argument.
+pub fn resolve_ungranted_raw(
+    granted_folders: &[GrantedFolder],
+    raw_path: Option<&str>,
+    require_write: bool,
+) -> Option<PathBuf> {
+    let raw_path = raw_path?;
     let cleaned = sanitize_tool_path(raw_path);
     let req = Path::new(cleaned);
     if !req.is_absolute() || !req.exists() {
         return None;
     }
     let target_canon = fs::canonicalize(req).ok()?;
-    let require_write = matches!(
-        tool_name,
-        "write_file" | "delete_file" | "create_directory" | "move_path" | "delete_directory"
-    );
     let allowed_roots = collect_allowed_roots(granted_folders, require_write);
     let already_covered = allowed_roots.iter().any(|root| {
         if root.is_file() {
@@ -128,28 +144,52 @@ pub fn requested_ungranted_path(
     }
 }
 
+/// Resolve the **exact** [`GrantedFolder::path`] targeted by a write tool, if it falls under one.
+pub fn resolve_target_folder_for_write(
+    granted_folders: &[GrantedFolder],
+    tool_name: &str,
+    args: &Value,
+) -> Option<PathBuf> {
+    let root_override = first_str_arg(args, &["root"]);
+    let raw_path = match tool_name {
+        "write_file" | "delete_file" => first_str_arg(args, PATH_ALIASES)?,
+        "create_directory" | "delete_directory" => first_str_arg(args, DIR_ALIASES)?,
+        "move_path" => first_str_arg(args, &["from"])?,
+        _ => return None,
+    };
+    let (matched_root, _) =
+        resolve_granted_root_inner(granted_folders, raw_path, root_override, false, true).ok()?;
+    granted_folders
+        .iter()
+        .find(|g| fs::canonicalize(&g.path).ok().as_ref() == Some(&matched_root))
+        .map(|g| g.path.clone())
+        .or(Some(matched_root))
+}
+
 /// Return `true` if a non-destructive write tool targets a folder already granted as Read & Write.
 pub fn is_write_already_granted(
     granted_folders: &[GrantedFolder],
     tool_name: &str,
     args: &Value,
 ) -> bool {
-    let root_override = args.get("root").and_then(|v| v.as_str());
+    let root_override = first_str_arg(args, &["root"]);
     match tool_name {
-        "write_file" | "create_directory" => {
-            let Some(path) = args
-                .get("path")
-                .or_else(|| args.get("directory"))
-                .and_then(|v| v.as_str())
-            else {
+        "write_file" => {
+            let Some(path) = first_str_arg(args, PATH_ALIASES) else {
+                return false;
+            };
+            resolve_granted_root(granted_folders, path, root_override, true).is_ok()
+        }
+        "create_directory" => {
+            let Some(path) = first_str_arg(args, DIR_ALIASES) else {
                 return false;
             };
             resolve_granted_root(granted_folders, path, root_override, true).is_ok()
         }
         "move_path" => {
             let (Some(from), Some(to)) = (
-                args.get("from").and_then(|v| v.as_str()),
-                args.get("to").and_then(|v| v.as_str()),
+                first_str_arg(args, &["from"]),
+                first_str_arg(args, &["to"]),
             ) else {
                 return false;
             };
@@ -186,6 +226,22 @@ pub(super) fn resolve_granted_root(
     root_override: Option<&str>,
     require_write: bool,
 ) -> Result<(PathBuf, String)> {
+    resolve_granted_root_inner(
+        granted_folders,
+        raw_path,
+        root_override,
+        require_write,
+        require_write,
+    )
+}
+
+fn resolve_granted_root_inner(
+    granted_folders: &[GrantedFolder],
+    raw_path: &str,
+    root_override: Option<&str>,
+    require_write: bool,
+    allow_new_target: bool,
+) -> Result<(PathBuf, String)> {
     let mut allowed_roots = collect_allowed_roots(granted_folders, require_write);
     if allowed_roots.is_empty() {
         if require_write {
@@ -220,7 +276,7 @@ pub(super) fn resolve_granted_root(
     if req.is_absolute() {
         let target_canon = if req.exists() {
             fs::canonicalize(req).with_context(|| format!("Path unavailable: {sanitized}"))?
-        } else if require_write {
+        } else if allow_new_target {
             let parent = req.parent().context("Invalid target path")?;
             let parent_canon = fs::canonicalize(parent)
                 .with_context(|| format!("Parent folder unavailable: {}", parent.display()))?;

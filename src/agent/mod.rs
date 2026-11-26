@@ -2,6 +2,8 @@
 
 pub mod parser;
 pub mod permissions;
+pub mod registry;
+pub mod tool;
 pub mod tools;
 pub mod web_search;
 

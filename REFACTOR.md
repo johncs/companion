@@ -174,7 +174,7 @@ Currently `ModelRecord.default_params_json` is parsed ad-hoc with `serde_json::V
 ### 3.1 Introduce `Tool` Trait & `ToolRegistry` (`src/agent/registry.rs`)
 Currently, adding or modifying a tool requires editing 6 different `match tool_name` blocks across `permissions.rs`, `tools/mod.rs`, `tools/path_guard.rs`, `chat_view/agent_runner.rs`, `chat_view/tool_runner.rs`, and `preferences/tools_group.rs`.
 
-- [ ] Define core tool abstractions in `src/agent/tool.rs`:
+- [x] Define core tool abstractions in `src/agent/tool.rs`:
   ```rust
   pub enum ToolRisk {
       ReadOnly,          // e.g. list_files, read_file, search_files
@@ -209,32 +209,32 @@ Currently, adding or modifying a tool requires editing 6 different `match tool_n
       },
   }
   ```
-- [ ] Define `Tool` trait (or clean enum-backed `ToolSpec` + `ToolRegistry`) where each tool owns:
+- [x] Define `Tool` trait (or clean enum-backed `ToolSpec` + `ToolRegistry`) where each tool owns:
   - `name(&self) -> &'static str`
   - `risk(&self) -> ToolRisk`
   - `parse_args(&self, raw: &Value) -> Result<TypedArgs>` — **single source of truth** for argument aliases (`path` / `file_path` / `filepath` / `file`, `directory`, `subdir`), fixing the drift between `describe_tool_action`, `execute_tool_with_grants`, `requested_ungranted_path`, and `is_write_already_granted`.
   - `describe(&self, ctx: &ToolContext, args: &Value) -> String`
   - `target_path(&self, args: &Value) -> Option<TargetPath>`
   - `execute(&self, ctx: &ToolContext, args: &Value) -> BoxFuture<'_, Result<String>>`
-- [ ] Implement `ToolRegistry` containing all built-in file tools + `web_search` + `fetch_url`, so `AgentRunner` dispatches every tool uniformly (and future MCP tools simply register as `Tool` implementations).
-- [ ] Update `PermissionEngine` (`src/agent/permissions.rs`) to consult `ToolRisk` instead of hardcoding tool name strings (`"list_files" | "read_file" | "search_files"` and `"delete_file" | "delete_directory"`).
+- [x] Implement `ToolRegistry` containing all built-in file tools + `web_search` + `fetch_url`, so `AgentRunner` dispatches every tool uniformly (and future MCP tools simply register as `Tool` implementations).
+- [x] Update `PermissionEngine` (`src/agent/permissions.rs`) to consult `ToolRisk` instead of hardcoding tool name strings (`"list_files" | "read_file" | "search_files"` and `"delete_file" | "delete_directory"`).
 
 ### 3.2 Fix Security & Correctness Bugs
-- [ ] **Fix over-broad folder write escalation** (currently in `ui/chat_view/tool_runner.rs:81-85` and `ui/chat_view/agent_runner.rs:291-303`):
+- [x] **Fix over-broad folder write escalation** (currently in `ui/chat_view/tool_runner.rs:81-85` and `ui/chat_view/agent_runner.rs:291-303`):
   - Resolve the **exact** target folder/file that a write tool (`write_file`, `create_directory`, `move_path`, `delete_file`, `delete_directory`) operates on.
   - On `AllowOnce`, grant temporary write access **only** to that resolved target folder/file — never mutate `g.allow_write = true` for every folder in `granted_folders`.
   - On `AllowChat`, persist `FolderPermission::ReadWrite` **only** for the specific target folder, leaving all other read-only granted folders untouched.
-- [ ] **Fix SSRF redirect bypass in `src/agent/web_search/mod.rs` (`execute_fetch_url`):**
+- [x] **Fix SSRF redirect bypass in `src/agent/web_search/mod.rs` (`execute_fetch_url`):**
   - Currently `shared_search_client()` uses `Policy::limited(4)` and validates `resp.url()` *after* redirects have already been requested.
   - Build a dedicated `shared_fetch_client()` with `reqwest::redirect::Policy::none()`.
   - Implement a manual redirect loop (max 4 hops): on each hop, call `validate_fetch_url` AND resolve DNS + verify `is_public_ip` for every address *before* issuing the next request (and pin/resolve cleanly).
-- [ ] **Add a shared `path_guard` target-resolution helper** so `describe`, `requested_ungranted_path`, `is_write_already_granted`, and `execute` all use the exact same resolution logic.
+- [x] **Add a shared `path_guard` target-resolution helper** so `describe`, `requested_ungranted_path`, `is_write_already_granted`, and `execute` all use the exact same resolution logic.
 
 ### 3.3 Tests & Verification
-- [ ] Add unit tests verifying argument-alias consistency across `describe`, `requested_ungranted_path`, and `execute` for every built-in tool.
-- [ ] Add unit tests verifying `AllowOnce` and `AllowChat` on folder A **never** escalate read-only folder B to `ReadWrite`.
-- [ ] Add unit tests for `execute_fetch_url` redirect validation (rejecting 302 → `http://127.0.0.1`, `http://[::1]`, `http://169.254.169.254`, `file://`, and > 4 hops).
-- [ ] **Verification:** `src/agent/tools/mod.rs` is `<= 300` lines; no function in `src/agent/` exceeds 50 lines; `cargo test` passes.
+- [x] Add unit tests verifying argument-alias consistency across `describe`, `requested_ungranted_path`, and `execute` for every built-in tool.
+- [x] Add unit tests verifying `AllowOnce` and `AllowChat` on folder A **never** escalate read-only folder B to `ReadWrite`.
+- [x] Add unit tests for `execute_fetch_url` redirect validation (rejecting 302 → `http://127.0.0.1`, `http://[::1]`, `http://169.254.169.254`, `file://`, and > 4 hops).
+- [x] **Verification:** `src/agent/tools/mod.rs` is `<= 300` lines; no function in `src/agent/` exceeds 50 lines; `cargo test` passes.
 
 ---
 
@@ -409,7 +409,7 @@ Eliminate `Rc<RefCell<Option<Rc<dyn Fn()>>>>` callback slots and 8–12 paramete
 |---|---|---|---|
 | **Sprint 1** | Pure Domain Types & Zero-GTK Core | `[x]` Done | Zero `glib` in domain layers; typed `ModelParams` & enums |
 | **Sprint 2** | Storage Hardening & Responsibility Split | `[x]` Done | Atomic migrations, zero DB `.expect()`, pure SQL repos |
-| **Sprint 3** | `ToolRegistry` & Security Fixes | `[ ]` Planned | Extensible tool system; SSRF & write-escalation bugs fixed |
+| **Sprint 3** | `ToolRegistry` & Security Fixes | `[x]` Done | Extensible tool system; SSRF & write-escalation bugs fixed |
 | **Sprint 4** | Extract `AgentRunner` from `chat_view` | `[ ]` Planned | Full headless agent loop tests; thin Relm4 chat renderer |
 | **Sprint 5** | `DownloadManager` & UI Cleanup | `[ ]` Planned | Zero `too_many_arguments`; injectable downloads; all UI files `<= 400` LOC |
 | **Sprint 6** | Parsers/Inference, Workspace & CI Gates | `[ ]` Planned | Compiler-enforced crate DAG; headless `cargo test`; lint gates |

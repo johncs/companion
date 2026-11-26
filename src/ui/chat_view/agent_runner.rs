@@ -10,6 +10,8 @@ use relm4::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::agent::parser::{parse_tool_calls, strip_tool_calls};
+use crate::agent::registry::ToolRegistry;
+use crate::agent::tool::ToolRisk;
 use crate::agent::tools::GrantedFolder;
 use crate::core::types::{
     ExecutionDevice, FolderPermission, MessageRole, PermissionDecision, ToolCallStatus,
@@ -85,6 +87,7 @@ impl ChatViewModel {
         let model_path = model_record.file_path.clone().unwrap_or_default();
 
         let provider = self.provider.clone();
+        let registry = ToolRegistry::with_builtins();
         let permissions = self.permissions.clone();
         let db = self.db.clone();
         let web_search_enabled = self.web_search_enabled;
@@ -230,58 +233,60 @@ impl ChatViewModel {
 
                 let mut tool_feedback = String::new();
                 for call in calls {
-                    let (tc, output, ungranted_target) = if call.name == "web_search"
-                        || call.name == "fetch_url"
-                    {
-                        let mut local_texts: Vec<String> = recorded_tools
-                            .iter()
-                            .filter(|t| t.tool_name == "read_file" && t.status == ToolCallStatus::Ok)
-                            .filter_map(|t| t.output.clone())
-                            .collect();
-                        for t in &turns {
-                            if matches!(t.role, ChatRole::User) && t.content.contains("<attachment") {
-                                local_texts.push(t.content.clone());
+                    let (tc, output, ungranted_target, write_target_folder) =
+                        if call.name == "web_search" || call.name == "fetch_url" {
+                            let mut local_texts: Vec<String> = recorded_tools
+                                .iter()
+                                .filter(|t| {
+                                    t.tool_name == "read_file" && t.status == ToolCallStatus::Ok
+                                })
+                                .filter_map(|t| t.output.clone())
+                                .collect();
+                            for t in &turns {
+                                if matches!(t.role, ChatRole::User)
+                                    && t.content.contains("<attachment")
+                                {
+                                    local_texts.push(t.content.clone());
+                                }
                             }
-                        }
-                        let (tc, out) = if call.name == "web_search" {
-                            run_web_search_call(
-                                &scroller,
-                                &stream_obj,
-                                &db,
-                                web_search_enabled,
-                                &local_texts,
-                                call,
-                            )
-                            .await
+                            let (tc, out) = if call.name == "web_search" {
+                                run_web_search_call(
+                                    &scroller,
+                                    &stream_obj,
+                                    &db,
+                                    web_search_enabled,
+                                    &local_texts,
+                                    call,
+                                )
+                                .await
+                            } else {
+                                run_fetch_url_call(
+                                    &scroller,
+                                    &stream_obj,
+                                    &db,
+                                    web_search_enabled,
+                                    &local_texts,
+                                    call,
+                                )
+                                .await
+                            };
+                            (tc, out, None, None)
                         } else {
-                            run_fetch_url_call(
+                            run_chat_tool_call(
                                 &scroller,
                                 &stream_obj,
-                                &db,
-                                web_search_enabled,
-                                &local_texts,
+                                &registry,
+                                &permissions,
+                                &granted_folders,
+                                &conv_id,
                                 call,
                             )
                             .await
                         };
-                        (tc, out, None)
-                    } else {
-                        run_chat_tool_call(
-                            &scroller,
-                            &stream_obj,
-                            &permissions,
-                            &granted_folders,
-                            &conv_id,
-                            call,
-                        )
-                        .await
-                    };
                     let tool_name = tc.tool_name.clone();
                     if tc.permission_decision == PermissionDecision::AllowChat {
-                        let needs_write = matches!(
-                            tool_name.as_str(),
-                            "write_file" | "create_directory" | "move_path"
-                        );
+                        let needs_write = registry.risk_of(&tool_name)
+                            == Some(ToolRisk::WriteWorkspace);
                         if let Some(new_path) = ungranted_target {
                             if !granted_folders.iter().any(|g| g.path == new_path) {
                                 granted_folders.push(GrantedFolder {
@@ -298,17 +303,19 @@ impl ChatViewModel {
                                     FolderPermission::ReadWrite,
                                 );
                             }
-                        } else {
+                        } else if needs_write && let Some(target_folder) = write_target_folder {
                             for gf in &mut granted_folders {
-                                if let Ok(entry) = db
-                                    .add_conversation_folder(&conv_id, &gf.path.to_string_lossy())
-                                    && tool_name == "write_file"
-                                {
+                                if gf.path == target_folder {
                                     gf.allow_write = true;
-                                    let _ = db.set_conversation_folder_permission(
-                                        &entry.id,
-                                        FolderPermission::ReadWrite,
-                                    );
+                                    if let Ok(entry) = db.add_conversation_folder(
+                                        &conv_id,
+                                        &gf.path.to_string_lossy(),
+                                    ) {
+                                        let _ = db.set_conversation_folder_permission(
+                                            &entry.id,
+                                            FolderPermission::ReadWrite,
+                                        );
+                                    }
                                 }
                             }
                         }
