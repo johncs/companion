@@ -6,8 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::core::ThinkingLevel;
-use crate::core::types::ToolCallStatus;
+use crate::core::types::{ExecutionDevice, MessageRole, ToolCallStatus};
 use crate::i18n::{gettext, tr_f};
 use crate::ui::message_object::{MessageEntry, MessageObject};
 
@@ -29,7 +28,7 @@ struct InfoWidgets {
 
 /// Present a GNOME `AdwDialog` showing message info, thinking trace, attachments, and tool calls.
 pub fn present_message_info_dialog(parent: &impl IsA<gtk::Widget>, msg_obj: MessageObject) {
-    let is_user = msg_obj.with_entry(|e| e.role == "user");
+    let is_user = msg_obj.with_entry(|e| e.role == MessageRole::User);
     let dialog = adw::Dialog::builder()
         .title(gettext("Message Info"))
         .content_width(560)
@@ -52,7 +51,14 @@ pub fn present_message_info_dialog(parent: &impl IsA<gtk::Widget>, msg_obj: Mess
     let rendered_tools = Rc::new(std::cell::Cell::new(0usize));
     let rendered_atts = Rc::new(std::cell::Cell::new(false));
     let sync_from_entry = move |entry: &MessageEntry| {
-        sync_entry_to_widgets(entry, is_user, &widgets, &last_len, &rendered_tools, &rendered_atts);
+        sync_entry_to_widgets(
+            entry,
+            is_user,
+            &widgets,
+            &last_len,
+            &rendered_tools,
+            &rendered_atts,
+        );
     };
 
     msg_obj.with_entry(&sync_from_entry);
@@ -215,7 +221,8 @@ fn sync_entry_to_widgets(
     rendered_tools: &std::cell::Cell<usize>,
     rendered_atts: &std::cell::Cell<bool>,
 ) {
-    w.date_val.set_label(&format_timestamp_text(entry.created_at));
+    w.date_val
+        .set_label(&format_timestamp_text(entry.created_at));
     if is_user {
         w.thinking_section.set_visible(false);
         w.tools_group.set_visible(false);
@@ -236,17 +243,13 @@ fn sync_entry_to_widgets(
 
     w.model_val
         .set_label(entry.model_name.as_deref().unwrap_or("—"));
-    let device_label = match entry.execution_device.as_deref() {
-        Some("gpu") => gettext("GPU (Vulkan)"),
-        Some("cpu") => gettext("CPU"),
-        _ => "—".to_string(),
+    let device_label = match entry.execution_device {
+        Some(ExecutionDevice::Gpu) => gettext("GPU (Vulkan)"),
+        Some(ExecutionDevice::Cpu) => gettext("CPU"),
+        None => "—".to_string(),
     };
     w.device_val.set_label(&device_label);
-    let lvl = entry
-        .thinking_level
-        .as_deref()
-        .map(ThinkingLevel::from_str_lossy)
-        .unwrap_or_default();
+    let lvl = entry.thinking_level.unwrap_or_default();
     w.thinking_level_val.set_label(&lvl.label());
     w.time_val.set_label(&format_duration_text(entry));
     w.speed_val.set_label(&format_speed_text(entry));
@@ -366,7 +369,11 @@ fn summarize_tool_call(tc: &crate::storage::ToolCallRecord) -> String {
     };
 
     if tc.status != ToolCallStatus::Ok
-        && let Some(err) = tc.output.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        && let Some(err) = tc
+            .output
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     {
         return format!("{target} — {err}");
     }

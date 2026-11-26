@@ -23,6 +23,7 @@ where
         .build();
 
     let global_enabled = db.get_web_search_global_enabled().unwrap_or(false);
+    let current_engine = db.get_search_engine().unwrap_or_default();
     let enable_row = adw::SwitchRow::builder()
         .title(gettext("Enable Web Search"))
         .subtitle(gettext(
@@ -30,12 +31,34 @@ where
         ))
         .active(global_enabled)
         .build();
+    let url_row = build_searxng_url_row(db, current_engine, global_enabled);
+    let engine_row = build_engine_row(db, current_engine, global_enabled, &url_row);
 
-    let engines = gtk::StringList::new(&[
-        &gettext("DuckDuckGo"),
-        &gettext("SearXNG (Custom URL)"),
-    ]);
-    let current_engine = db.get_search_engine().unwrap_or_default();
+    let db_toggle = db.clone();
+    let engine_row_ref = engine_row.clone();
+    let url_row_ref = url_row.clone();
+    let on_global_changed = Rc::new(on_global_changed);
+    enable_row.connect_active_notify(move |row| {
+        let active = row.is_active();
+        let _ = db_toggle.set_web_search_global_enabled(active);
+        engine_row_ref.set_sensitive(active);
+        url_row_ref.set_sensitive(active);
+        on_global_changed(active);
+    });
+
+    group.add(&enable_row);
+    group.add(&engine_row);
+    group.add(&url_row);
+    group
+}
+
+fn build_engine_row(
+    db: &Database,
+    current_engine: SearchEngine,
+    global_enabled: bool,
+    url_row: &adw::EntryRow,
+) -> adw::ComboRow {
+    let engines = gtk::StringList::new(&[&gettext("DuckDuckGo"), &gettext("SearXNG (Custom URL)")]);
     let engine_row = adw::ComboRow::builder()
         .title(gettext("Search Engine"))
         .model(&engines)
@@ -45,7 +68,24 @@ where
         })
         .sensitive(global_enabled)
         .build();
+    let db = db.clone();
+    let url_row_ref = url_row.clone();
+    engine_row.connect_selected_notify(move |row| {
+        let engine = match row.selected() {
+            1 => SearchEngine::SearXNG,
+            _ => SearchEngine::DuckDuckGo,
+        };
+        let _ = db.set_search_engine(engine);
+        url_row_ref.set_visible(engine == SearchEngine::SearXNG);
+    });
+    engine_row
+}
 
+fn build_searxng_url_row(
+    db: &Database,
+    current_engine: SearchEngine,
+    global_enabled: bool,
+) -> adw::EntryRow {
     let current_url = db.get_searxng_url().ok().flatten().unwrap_or_default();
     let url_row = adw::EntryRow::builder()
         .title(gettext("SearXNG Instance URL"))
@@ -53,51 +93,17 @@ where
         .visible(current_engine == SearchEngine::SearXNG)
         .sensitive(global_enabled)
         .build();
-
-    {
-        let db = db.clone();
-        let engine_row_ref = engine_row.clone();
-        let url_row_ref = url_row.clone();
-        let on_global_changed = Rc::new(on_global_changed);
-        enable_row.connect_active_notify(move |row| {
-            let active = row.is_active();
-            let _ = db.set_web_search_global_enabled(active);
-            engine_row_ref.set_sensitive(active);
-            url_row_ref.set_sensitive(active);
-            on_global_changed(active);
-        });
-    }
-
-    {
-        let db = db.clone();
-        let url_row_ref = url_row.clone();
-        engine_row.connect_selected_notify(move |row| {
-            let engine = match row.selected() {
-                1 => SearchEngine::SearXNG,
-                _ => SearchEngine::DuckDuckGo,
-            };
-            let _ = db.set_search_engine(engine);
-            url_row_ref.set_visible(engine == SearchEngine::SearXNG);
-        });
-    }
-
-    {
-        let db = db.clone();
-        let commit_url = Rc::new(move |row: &adw::EntryRow| {
-            let _ = db.set_searxng_url(&row.text());
-        });
-        let c1 = commit_url.clone();
-        url_row.connect_changed(move |row| c1(row));
-        let c2 = commit_url.clone();
-        url_row.connect_entry_activated(move |row| c2(row));
-        let focus = gtk::EventControllerFocus::new();
-        let row_ref = url_row.clone();
-        focus.connect_leave(move |_| commit_url(&row_ref));
-        url_row.add_controller(focus);
-    }
-
-    group.add(&enable_row);
-    group.add(&engine_row);
-    group.add(&url_row);
-    group
+    let db = db.clone();
+    let commit_url = Rc::new(move |row: &adw::EntryRow| {
+        let _ = db.set_searxng_url(&row.text());
+    });
+    let c1 = commit_url.clone();
+    url_row.connect_changed(move |row| c1(row));
+    let c2 = commit_url.clone();
+    url_row.connect_entry_activated(move |row| c2(row));
+    let focus = gtk::EventControllerFocus::new();
+    let row_ref = url_row.clone();
+    focus.connect_leave(move |_| commit_url(&row_ref));
+    url_row.add_controller(focus);
+    url_row
 }

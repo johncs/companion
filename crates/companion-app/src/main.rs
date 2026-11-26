@@ -1,6 +1,6 @@
 //! Companion application entry point.
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub(crate) use companion_agent as agent;
 pub(crate) use companion_core as core;
@@ -37,7 +37,9 @@ fn main() {
                     let _ = db.set_user_name(&real);
                 }
             }
-            if let Err(err) = models::registry::ModelRegistryService::sync_managed_models(&db, &paths.models_dir) {
+            if let Err(err) =
+                models::registry::ModelRegistryService::sync_managed_models(&db, &paths.models_dir)
+            {
                 tracing::warn!("Failed to synchronize managed models: {err}");
             }
             let app = RelmApp::new(APP_ID);

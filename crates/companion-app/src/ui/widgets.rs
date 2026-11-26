@@ -1,8 +1,9 @@
 //! Reusable GTK4 and libadwaita widget helpers.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -11,8 +12,46 @@ use crate::i18n::gettext;
 
 const MAX_CACHED_TEXTURES: usize = 128;
 
+struct LruTextureCache<V> {
+    capacity: usize,
+    order: VecDeque<String>,
+    map: HashMap<String, V>,
+}
+
+impl<V: Clone> LruTextureCache<V> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            order: VecDeque::with_capacity(capacity),
+            map: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<V> {
+        let val = self.map.get(key)?.clone();
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+            self.order.push_back(key.to_string());
+        }
+        Some(val)
+    }
+
+    fn insert(&mut self, key: String, val: V) {
+        if let Some(pos) = self.order.iter().position(|k| k == &key) {
+            self.order.remove(pos);
+        } else if self.map.len() >= self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.map.remove(&oldest);
+        }
+        self.order.push_back(key.clone());
+        self.map.insert(key, val);
+    }
+}
+
 thread_local! {
-    static TEXTURE_CACHE: RefCell<HashMap<String, gdk::Texture>> = RefCell::new(HashMap::new());
+    static TEXTURE_CACHE: RefCell<LruTextureCache<gdk::Texture>> =
+        RefCell::new(LruTextureCache::new(MAX_CACHED_TEXTURES));
 }
 
 /// Remove all child widgets from a [`gtk::Box`].
@@ -94,41 +133,57 @@ pub fn present_destructive_confirm<F>(
     alert.present(Some(parent));
 }
 
-/// Build a rounded, aspect-ratio-preserving image thumbnail (falling back to a missing-image icon).
+/// Build a rounded, aspect-ratio-preserving image thumbnail (decoded asynchronously off the main thread).
 pub fn build_image_thumbnail(file_path: &str, max_size: i32) -> gtk::Widget {
-    let path = Path::new(file_path);
-    if !path.exists() {
-        let fallback = gtk::Image::from_icon_name("image-missing-symbolic");
-        fallback.set_pixel_size(max_size.min(32));
-        fallback.set_size_request(max_size, max_size);
-        return fallback.upcast();
+    if let Some(tex) = TEXTURE_CACHE.with(|cache| cache.borrow_mut().get(file_path)) {
+        let img = gtk::Image::from_paintable(Some(&tex));
+        img.set_pixel_size(max_size);
+        img.set_halign(gtk::Align::Start);
+        img.set_valign(gtk::Align::Center);
+        img.add_css_class("image-thumb");
+        return img.upcast();
     }
 
-    let cached = TEXTURE_CACHE.with(|cache| cache.borrow().get(file_path).cloned());
-    let tex = if let Some(t) = cached {
-        Some(t)
-    } else if let Ok(t) = gdk::Texture::from_file(&gio::File::for_path(path)) {
-        TEXTURE_CACHE.with(|cache| {
-            let mut map = cache.borrow_mut();
-            if map.len() >= MAX_CACHED_TEXTURES {
-                map.clear();
-            }
-            map.insert(file_path.to_string(), t.clone());
-        });
-        Some(t)
-    } else {
-        None
-    };
-
-    let img = if let Some(tex) = tex {
-        gtk::Image::from_paintable(Some(&tex))
-    } else {
-        gtk::Image::from_icon_name("image-x-generic-symbolic")
-    };
+    let img = gtk::Image::from_icon_name("image-x-generic-symbolic");
     img.set_pixel_size(max_size);
     img.set_halign(gtk::Align::Start);
     img.set_valign(gtk::Align::Center);
     img.add_css_class("image-thumb");
+
+    let path_owned = file_path.to_string();
+    let img_weak = img.downgrade();
+    spawn_blocking_ui(
+        move || {
+            let path = PathBuf::from(&path_owned);
+            let meta = std::fs::metadata(&path).ok()?;
+            let _stamp = (
+                meta.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                meta.len(),
+            );
+            gdk::Texture::from_file(&gio::File::for_path(&path))
+                .ok()
+                .map(|tex| (path_owned, tex))
+        },
+        move |loaded| {
+            let Some(img) = img_weak.upgrade() else {
+                return;
+            };
+            match loaded {
+                Some((key, tex)) => {
+                    TEXTURE_CACHE.with(|cache| cache.borrow_mut().insert(key, tex.clone()));
+                    img.set_paintable(Some(&tex));
+                }
+                None => {
+                    img.set_icon_name(Some("image-missing-symbolic"));
+                }
+            }
+        },
+    );
+
     img.upcast()
 }
 
@@ -234,4 +289,22 @@ fn find_listbox(root: &gtk::Widget) -> Option<gtk::ListBox> {
         child = widget.next_sibling();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LruTextureCache;
+
+    #[test]
+    fn lru_cache_promotes_hits_and_evicts_least_recently_used() {
+        let mut cache = LruTextureCache::new(2);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+        assert_eq!(cache.get("a"), Some(1));
+
+        cache.insert("c".to_string(), 3);
+        assert_eq!(cache.get("b"), None);
+        assert_eq!(cache.get("a"), Some(1));
+        assert_eq!(cache.get("c"), Some(3));
+    }
 }

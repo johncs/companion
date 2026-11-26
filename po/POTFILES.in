@@ -1,7 +1,7 @@
 data/io.github.companion.Companion.desktop.in
 data/io.github.companion.Companion.metainfo.xml.in
 crates/companion-agent/src/lib.rs
-crates/companion-agent/src/runner.rs
+crates/companion-agent/src/runner/mod.rs
 crates/companion-agent/src/web_search/mod.rs
 crates/companion-agent/src/web_search/privacy_guard.rs
 crates/companion-core/src/attachments.rs
@@ -12,8 +12,10 @@ crates/companion-inference/src/llama_cpp/runner.rs
 crates/companion-app/src/main.rs
 crates/companion-models/src/hardware.rs
 crates/companion-storage/src/attachments.rs
-crates/companion-app/src/ui/chat_controls_dialog.rs
+crates/companion-app/src/ui/chat_controls_dialog/form_state.rs
+crates/companion-app/src/ui/chat_controls_dialog/mod.rs
 crates/companion-app/src/ui/chat_view/agent_runner.rs
+crates/companion-app/src/ui/chat_view/handlers.rs
 crates/companion-app/src/ui/chat_view/message_actions.rs
 crates/companion-app/src/ui/chat_view/mod.rs
 crates/companion-app/src/ui/composer/actions.rs
@@ -36,7 +38,9 @@ crates/companion-app/src/ui/message_row/blocks.rs
 crates/companion-app/src/ui/message_row/mod.rs
 crates/companion-app/src/ui/model_config_dialog.rs
 crates/companion-app/src/ui/model_manager/active_details.rs
+crates/companion-app/src/ui/model_manager/active_group.rs
 crates/companion-app/src/ui/model_manager/mod.rs
+crates/companion-app/src/ui/model_manager/view_model.rs
 crates/companion-app/src/ui/model_manager/vision_download.rs
 crates/companion-app/src/ui/model_manager/vision_setup.rs
 crates/companion-app/src/ui/permission_dialog.rs
@@ -45,7 +49,9 @@ crates/companion-app/src/ui/preferences/personalization_group.rs
 crates/companion-app/src/ui/preferences/storage_stats.rs
 crates/companion-app/src/ui/preferences/tools_group.rs
 crates/companion-app/src/ui/preferences/web_search_group.rs
+crates/companion-app/src/ui/sidebar/actions.rs
 crates/companion-app/src/ui/sidebar/mod.rs
 crates/companion-app/src/ui/sidebar/widgets.rs
 crates/companion-app/src/ui/sidebar_rows.rs
+crates/companion-app/src/ui/widgets.rs
 crates/companion-app/src/ui/window.rs

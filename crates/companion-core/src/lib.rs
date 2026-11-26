@@ -1,6 +1,6 @@
 //! Core domain logic: Markdown rendering, thinking levels, and shared async runtime.
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod attachments;
 pub mod i18n;
@@ -13,6 +13,7 @@ pub mod types;
 
 use std::sync::LazyLock;
 
+#[allow(clippy::expect_used)]
 static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -51,10 +52,7 @@ where
         for chunk in items.chunks(chunk_size) {
             handles.push(s.spawn(|| f(chunk)));
         }
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok())
-            .collect()
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
     })
 }
 
@@ -231,7 +229,13 @@ mod tests {
         let msg = AssistantPersonality::Friendly.prompt_guidance("Emma", Some("John"));
         assert!(msg.contains("Emma"));
         assert!(msg.contains("John"));
-        assert_eq!(AssistantPersonality::from_str_lossy("playful"), AssistantPersonality::Playful);
-        assert_eq!(AssistantPersonality::from_str_lossy("unknown"), AssistantPersonality::Friendly);
+        assert_eq!(
+            AssistantPersonality::from_str_lossy("playful"),
+            AssistantPersonality::Playful
+        );
+        assert_eq!(
+            AssistantPersonality::from_str_lossy("unknown"),
+            AssistantPersonality::Friendly
+        );
     }
 }

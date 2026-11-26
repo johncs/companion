@@ -2,15 +2,21 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use crate::tool::BoxFuture;
+use crate::approval::{ApprovalHandler, ApprovalResponse};
+use crate::permissions::PermissionEngine;
+use crate::registry::ToolRegistry;
+use crate::tool::{ApprovalRequest, BoxFuture};
+use companion_core::ThinkingLevel;
 use companion_core::provider::ChatEvent;
+use companion_core::types::{ExecutionDevice, PermissionDecision, ToolCallStatus};
+use companion_storage::Database;
 
-struct MockModelProvider {
+pub(super) struct MockModelProvider {
     steps: Mutex<VecDeque<Vec<ChatEvent>>>,
 }
 
 impl MockModelProvider {
-    fn new(steps: Vec<Vec<ChatEvent>>) -> Self {
+    pub(super) fn new(steps: Vec<Vec<ChatEvent>>) -> Self {
         Self {
             steps: Mutex::new(VecDeque::from(steps)),
         }
@@ -42,20 +48,20 @@ impl ModelProvider for MockModelProvider {
     }
 }
 
-struct MockApprovalHandler {
+pub(super) struct MockApprovalHandler {
     responses: Mutex<VecDeque<ApprovalResponse>>,
     seen_requests: Mutex<Vec<ApprovalRequest>>,
 }
 
 impl MockApprovalHandler {
-    fn new(responses: Vec<ApprovalResponse>) -> Self {
+    pub(super) fn new(responses: Vec<ApprovalResponse>) -> Self {
         Self {
             responses: Mutex::new(VecDeque::from(responses)),
             seen_requests: Mutex::new(Vec::new()),
         }
     }
 
-    fn seen(&self) -> Vec<ApprovalRequest> {
+    pub(super) fn seen(&self) -> Vec<ApprovalRequest> {
         self.seen_requests.lock().unwrap().clone()
     }
 }
@@ -73,7 +79,7 @@ impl ApprovalHandler for MockApprovalHandler {
     }
 }
 
-fn base_config(conv_id: &str, folders: Vec<GrantedFolder>, web: bool) -> AgentRunConfig {
+pub(super) fn base_config(conv_id: &str, folders: Vec<GrantedFolder>, web: bool) -> AgentRunConfig {
     AgentRunConfig {
         conv_id: conv_id.to_string(),
         model_id: "m1".to_string(),
@@ -93,7 +99,7 @@ fn base_config(conv_id: &str, folders: Vec<GrantedFolder>, web: bool) -> AgentRu
     }
 }
 
-fn run_agent(
+pub(super) fn run_agent(
     provider: MockModelProvider,
     approver: Arc<MockApprovalHandler>,
     db: &Database,
@@ -107,9 +113,13 @@ fn run_agent(
         db: db.clone(),
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
-    runtime().block_on(async {
-        runner.run(cfg, tx).await;
-    });
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            runner.run(cfg, tx).await;
+        });
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         events.push(ev);
@@ -132,18 +142,39 @@ fn single_turn_streaming_persists_message_and_usage() {
         ChatEvent::Done,
     ]]);
     let approver = Arc::new(MockApprovalHandler::new(vec![]));
-    let events = run_agent(provider, approver, &db, base_config(&conv.id, vec![], false));
+    let events = run_agent(
+        provider,
+        approver,
+        &db,
+        base_config(&conv.id, vec![], false),
+    );
 
     let finished = events.iter().find_map(|e| match e {
         AgentEvent::Finished {
             saved_message_id,
+            created_at,
+            final_answer,
+            final_reasoning,
             total_tokens,
             empty,
             ..
-        } => Some((saved_message_id.clone(), *total_tokens, *empty)),
+        } => Some((
+            saved_message_id.clone(),
+            *created_at,
+            final_answer.clone(),
+            final_reasoning.clone(),
+            *total_tokens,
+            *empty,
+        )),
         _ => None,
     });
-    assert!(matches!(finished, Some((Some(_), 5, false))));
+    let (saved_id, created_at, final_answer, final_reasoning, tokens, empty) = finished.unwrap();
+    assert!(saved_id.is_some());
+    assert!(created_at.is_some());
+    assert_eq!(final_answer, "Final reply");
+    assert_eq!(final_reasoning.as_deref(), Some("pondering"));
+    assert_eq!(tokens, 5);
+    assert!(!empty);
 
     let msgs = db.list_messages_page(&conv.id, None, 10).unwrap();
     assert_eq!(msgs.len(), 1);
@@ -168,7 +199,10 @@ fn multi_step_tool_call_executes_and_feeds_result_back() {
             )),
             ChatEvent::Done,
         ],
-        vec![ChatEvent::Token("File says secret-value".into()), ChatEvent::Done],
+        vec![
+            ChatEvent::Token("File says secret-value".into()),
+            ChatEvent::Done,
+        ],
     ]);
     let approver = Arc::new(MockApprovalHandler::new(vec![]));
     let events = run_agent(
@@ -197,7 +231,6 @@ fn multi_step_tool_call_executes_and_feeds_result_back() {
     assert_eq!(msgs[0].content, "File says secret-value");
     let _ = std::fs::remove_dir_all(&dir);
 }
-
 #[test]
 fn denied_tool_call_does_not_execute_and_records_denial() {
     let dir = std::env::temp_dir().join(format!("companion_runner_deny_{}", uuid::Uuid::new_v4()));
@@ -243,7 +276,6 @@ fn denied_tool_call_does_not_execute_and_records_denial() {
     assert_eq!(tc.output.as_deref(), Some("User denied permission."));
     let _ = std::fs::remove_dir_all(&dir);
 }
-
 #[test]
 fn cancelled_empty_run_skips_persistence() {
     let db = Database::open_in_memory().unwrap();
@@ -266,7 +298,11 @@ fn cancelled_empty_run_skips_persistence() {
             ..
         }
     )));
-    assert!(db.list_messages_page(&conv.id, None, 10).unwrap().is_empty());
+    assert!(
+        db.list_messages_page(&conv.id, None, 10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -306,117 +342,4 @@ fn max_agent_steps_caps_infinite_tool_loops() {
         AgentEvent::Notice(msg) if msg.contains("maximum tool call steps")
     )));
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn web_search_forwards_privacy_warnings_to_approval_handler() {
-    let db = Database::open_in_memory().unwrap();
-    db.set_web_search_global_enabled(true).unwrap();
-    let conv = db.create_conversation("Web Search Privacy").unwrap();
-
-    let mut cfg = base_config(&conv.id, vec![], true);
-    cfg.turns[0].content = "<attachment name=\"secret.txt\">API_TOKEN_12345</attachment>".into();
-
-    let provider = MockModelProvider::new(vec![
-        vec![
-            ChatEvent::Token(
-                "<tool_call>{\"name\":\"web_search\",\"arguments\":{\"query\":\"/home/alice/secret.txt\"}}</tool_call>".into(),
-            ),
-            ChatEvent::Done,
-        ],
-        vec![ChatEvent::Token("Done".into()), ChatEvent::Done],
-    ]);
-    let approver = Arc::new(MockApprovalHandler::new(vec![ApprovalResponse::WebSearch(
-        None,
-    )]));
-    let events = run_agent(provider, approver.clone(), &db, cfg);
-
-    let seen = approver.seen();
-    assert_eq!(seen.len(), 1);
-    match &seen[0] {
-        ApprovalRequest::WebSearch {
-            proposed_query,
-            warnings,
-            ..
-        } => {
-            assert_eq!(proposed_query, "/home/alice/secret.txt");
-            assert!(!warnings.is_empty(), "expected privacy leak warning");
-        }
-        other => panic!("expected WebSearch request, got {other:?}"),
-    }
-    assert!(events.iter().any(|e| matches!(
-        e,
-        AgentEvent::ToolCallRecorded(tc) if tc.status == ToolCallStatus::Denied
-    )));
-}
-
-#[test]
-fn allow_chat_persists_write_only_for_targeted_folder() {
-    let base = std::env::temp_dir().join(format!("companion_runner_ac_{}", uuid::Uuid::new_v4()));
-    let folder_a = base.join("folder_a");
-    let folder_b = base.join("folder_b");
-    std::fs::create_dir_all(&folder_a).unwrap();
-    std::fs::create_dir_all(&folder_b).unwrap();
-
-    let db = Database::open_in_memory().unwrap();
-    let conv = db.create_conversation("AllowChat Isolation").unwrap();
-    db.add_conversation_folder(&conv.id, &folder_a.to_string_lossy())
-        .unwrap();
-    db.add_conversation_folder(&conv.id, &folder_b.to_string_lossy())
-        .unwrap();
-
-    let target = folder_a.join("note.txt");
-    let provider = MockModelProvider::new(vec![
-        vec![
-            ChatEvent::Token(format!(
-                "<tool_call>{{\"name\":\"write_file\",\"arguments\":{{\"path\":\"{}\",\"content\":\"ok\"}}}}</tool_call>",
-                target.display()
-            )),
-            ChatEvent::Done,
-        ],
-        vec![ChatEvent::Token("Written".into()), ChatEvent::Done],
-    ]);
-    let approver = Arc::new(MockApprovalHandler::new(vec![ApprovalResponse::Tool(
-        PermissionDecision::AllowChat,
-    )]));
-    let events = run_agent(
-        provider,
-        approver,
-        &db,
-        base_config(
-            &conv.id,
-            vec![
-                GrantedFolder {
-                    path: folder_a.clone(),
-                    allow_write: false,
-                },
-                GrantedFolder {
-                    path: folder_b.clone(),
-                    allow_write: false,
-                },
-            ],
-            false,
-        ),
-    );
-
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::FolderGrantsUpdated)));
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "ok");
-
-    let folders = db.list_conversation_folders(&conv.id).unwrap();
-    let perm_a = folders
-        .iter()
-        .find(|f| f.folder_path == folder_a.to_string_lossy())
-        .unwrap()
-        .permission_mode;
-    let perm_b = folders
-        .iter()
-        .find(|f| f.folder_path == folder_b.to_string_lossy())
-        .unwrap()
-        .permission_mode;
-    assert_eq!(perm_a, FolderPermission::ReadWrite);
-    assert_eq!(perm_b, FolderPermission::Read);
-
-    let _ = std::fs::remove_dir_all(&base);
 }

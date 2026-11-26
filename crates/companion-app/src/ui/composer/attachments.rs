@@ -58,11 +58,7 @@ impl AttachmentQueue {
     }
 
     pub(super) fn take_ready(&mut self) -> Vec<AttachmentRecord> {
-        let ready = self
-            .chips
-            .iter()
-            .filter_map(|c| c.record.clone())
-            .collect();
+        let ready = self.chips.iter().filter_map(|c| c.record.clone()).collect();
         self.chips.clear();
         ready
     }
@@ -83,25 +79,21 @@ pub(super) fn open_attach_file_dialog(
     let window = anchor.root().and_then(|r| r.downcast::<gtk::Window>().ok());
     let sender_clone = sender.clone();
 
-    file_dialog.open_multiple(
-        window.as_ref(),
-        None::<&gio::Cancellable>,
-        move |res| {
-            if let Ok(list) = res {
-                let mut paths = Vec::new();
-                for idx in 0..list.n_items() {
-                    if let Some(file) = list.item(idx).and_downcast::<gio::File>()
-                        && let Some(p) = file.path()
-                    {
-                        paths.push(p);
-                    }
-                }
-                if !paths.is_empty() {
-                    sender_clone.input(ComposerMsg::FilesDropped(paths));
+    file_dialog.open_multiple(window.as_ref(), None::<&gio::Cancellable>, move |res| {
+        if let Ok(list) = res {
+            let mut paths = Vec::new();
+            for idx in 0..list.n_items() {
+                if let Some(file) = list.item(idx).and_downcast::<gio::File>()
+                    && let Some(p) = file.path()
+                {
+                    paths.push(p);
                 }
             }
-        },
-    );
+            if !paths.is_empty() {
+                sender_clone.input(ComposerMsg::FilesDropped(paths));
+            }
+        }
+    });
 }
 
 pub(super) fn enqueue_dropped_paths(
@@ -209,7 +201,7 @@ pub(super) fn rebuild_chips_box(
 
             let remove_btn = gtk::Button::builder()
                 .icon_name("window-close-symbolic")
-                .tooltip_text(&gettext("Remove attachment"))
+                .tooltip_text(gettext("Remove attachment"))
                 .halign(gtk::Align::End)
                 .valign(gtk::Align::Start)
                 .css_classes(["thumb-remove-btn"])

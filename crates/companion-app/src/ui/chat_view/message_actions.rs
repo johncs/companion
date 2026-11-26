@@ -1,91 +1,34 @@
 //! Conversation loading, message edit/delete, folder granting, and stream cancellation helpers.
 
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::glib;
 use relm4::prelude::*;
 
-use crate::core::types::{FolderPermission, MessageRole};
+use crate::agent::prompt::MessageWithAttachments;
+use crate::core::types::MessageRole;
 use crate::core::{ThinkingLevel, runtime};
 use crate::i18n::{gettext, tr_f};
-use crate::storage::{AttachmentRecord, ModelRecord, NewMessage};
+use crate::storage::entities::Message;
+use crate::storage::{AttachmentRecord, NewMessage};
 use crate::ui::composer::ComposerMsg;
 use crate::ui::message_object::MessageObject;
-use crate::ui::permission_dialog::{FolderDropGrantChoice, present_folder_drop_confirm_dialog};
 
-use super::agent_runner::ActiveChatRun;
-use super::page_loader::{load_and_parse_page, scroll_scroller_to_bottom};
+use super::agent_runner::{ActiveChatRun, PreparedPrompt, StreamLaunch, prepare_prompt_blocking};
+use super::page_loader::load_and_parse_page;
 use super::{ChatViewModel, ChatViewMsg, ChatViewOutput};
 
-impl ChatViewModel {
-    pub(super) fn handle_grant_folder(&self, path: PathBuf, sender: &ComponentSender<Self>) {
-        let Some(conv_id) = self.active_conversation_id.clone() else {
-            return;
-        };
-        let folder_str = path.to_string_lossy().to_string();
-        let folder_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&folder_str)
-            .to_string();
-        let existing = self.db.list_conversation_folders(&conv_id).unwrap_or_default();
-        if existing.iter().any(|f| f.folder_path == folder_str) {
-            let _ = sender.output(ChatViewOutput::ShowToast(tr_f(
-                "Folder already granted: {folder}",
-                &[("folder", &folder_name)],
-            )));
-            return;
-        }
-        let db = self.db.clone();
-        let sender_clone = sender.clone();
-        let folder_name_cb = folder_name.clone();
-        let folder_str_cb = folder_str.clone();
-        present_folder_drop_confirm_dialog(
-            &self.scrolled_window,
-            &folder_name,
-            &folder_str,
-            move |choice| {
-                let allow_write = match choice {
-                    FolderDropGrantChoice::Cancel => return,
-                    FolderDropGrantChoice::ReadOnly => false,
-                    FolderDropGrantChoice::ReadWrite => true,
-                };
-                match db.add_conversation_folder(&conv_id, &folder_str_cb) {
-                    Ok(entry) => {
-                        if allow_write {
-                            let _ = db.set_conversation_folder_permission(
-                                &entry.id,
-                                FolderPermission::ReadWrite,
-                            );
-                        }
-                        sender_clone.input(ChatViewMsg::RefreshGrantedFolders);
-                        let msg = if allow_write {
-                            tr_f(
-                                "Granted read & write access to {folder}",
-                                &[("folder", &folder_name_cb)],
-                            )
-                        } else {
-                            tr_f(
-                                "Granted read-only access to {folder}",
-                                &[("folder", &folder_name_cb)],
-                            )
-                        };
-                        let _ = sender_clone.output(ChatViewOutput::ShowToast(msg));
-                    }
-                    Err(err) => {
-                        let _ = sender_clone.output(ChatViewOutput::ShowToast(tr_f(
-                            "Failed to grant folder: {err}",
-                            &[("err", &err.to_string())],
-                        )));
-                    }
-                }
-            },
-        );
-    }
+#[derive(Debug)]
+pub struct EditPreparedPayload {
+    pub(super) conv_id: String,
+    pub(super) pos: u32,
+    pub(super) message_id: String,
+    pub(super) new_content: String,
+    pub(super) thinking_level: ThinkingLevel,
+    pub(super) result: Result<PreparedPrompt, String>,
+}
 
+impl ChatViewModel {
     pub(super) fn handle_send_message(
         &mut self,
         text: String,
@@ -97,39 +40,87 @@ impl ChatViewModel {
         let Some(conv_id) = self.active_conversation_id.clone() else {
             return;
         };
-        let Some(model_record) = self.resolve_active_model(sender) else {
+        if self.active_model_id.is_none() {
+            let _ = sender.output(ChatViewOutput::ShowToast(gettext(
+                "No model selected or model file is missing. Choose a model in Settings.",
+            )));
             return;
-        };
+        }
 
-        match self.db.insert_message(NewMessage {
-            conversation_id: &conv_id,
+        let mut history = self.capture_history_snapshot(None);
+        history.push(MessageWithAttachments {
             role: MessageRole::User,
-            content: &text,
-            reasoning_content: None,
-            thinking_level: Some(thinking_level),
-            model_name: None,
-            execution_device: None,
-            token_count: 0,
-            generation_ms: None,
-        }) {
-            Ok(user_msg) => {
-                if let Err(err) = self.db.insert_attachments(&user_msg.id, &attachments) {
-                    tracing::warn!("Failed to persist attachments: {err}");
+            content: text.clone(),
+            attachments: attachments.clone(),
+        });
+        let prep_input = self.build_prompt_prep_input(conv_id.clone(), history);
+        let db = self.db.clone();
+        let input_sender = sender.input_sender().clone();
+
+        runtime().spawn_blocking(move || {
+            let result =
+                (|| -> Result<(Message, Vec<AttachmentRecord>, PreparedPrompt), String> {
+                    let prepared = prepare_prompt_blocking(&prep_input)?;
+                    let user_msg = db
+                        .insert_message(NewMessage {
+                            conversation_id: &conv_id,
+                            role: MessageRole::User,
+                            content: &text,
+                            reasoning_content: None,
+                            thinking_level: Some(thinking_level),
+                            model_name: None,
+                            execution_device: None,
+                            token_count: 0,
+                            generation_ms: None,
+                        })
+                        .map_err(|e| {
+                            tr_f("Failed to save message: {err}", &[("err", &e.to_string())])
+                        })?;
+                    if let Err(err) = db.insert_attachments(&user_msg.id, &attachments) {
+                        tracing::warn!("Failed to persist attachments: {err}");
+                    }
+                    Ok((user_msg, attachments, prepared))
+                })();
+            let _ = input_sender.send(ChatViewMsg::SendPrepared {
+                conv_id: prep_input.conv_id,
+                thinking_level,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn handle_send_prepared(
+        &mut self,
+        conv_id: String,
+        thinking_level: ThinkingLevel,
+        result: Result<(Message, Vec<AttachmentRecord>, PreparedPrompt), String>,
+        sender: &ComponentSender<Self>,
+    ) {
+        match result {
+            Ok((user_msg, attachments, prepared)) => {
+                if self.active_conversation_id.as_deref() == Some(conv_id.as_str()) {
+                    self.store.append(&MessageObject::from_message_with_extras(
+                        &user_msg,
+                        attachments,
+                        Vec::new(),
+                    ));
+                    self.is_empty = false;
+                    self.scroll_to_bottom();
                 }
-                self.store.append(&MessageObject::from_message_with_extras(
-                    &user_msg,
-                    attachments,
-                    Vec::new(),
-                ));
-                self.is_empty = false;
-                self.scroll_to_bottom();
-                self.start_llama_stream(&conv_id, &model_record, thinking_level, sender);
+                self.start_llama_stream(
+                    StreamLaunch {
+                        conv_id,
+                        model_record: prepared.model_record,
+                        thinking_level,
+                        granted_folders: prepared.granted_folders,
+                        turns: prepared.turns,
+                        notices: prepared.notices,
+                    },
+                    sender,
+                );
             }
             Err(err) => {
-                let _ = sender.output(ChatViewOutput::ShowToast(tr_f(
-                    "Failed to save message: {err}",
-                    &[("err", &err.to_string())],
-                )));
+                let _ = sender.output(ChatViewOutput::ShowToast(err));
             }
         }
     }
@@ -144,45 +135,110 @@ impl ChatViewModel {
         let Some(conv_id) = self.active_conversation_id.clone() else {
             return;
         };
-        let Some(model_record) = self.resolve_active_model(sender) else {
-            return;
-        };
-
-        let mut found: Option<(u32, MessageObject, i64)> = None;
-        for idx in 0..self.store.n_items() {
-            if let Some(obj) = self.store.item(idx).and_downcast::<MessageObject>() {
-                let entry = obj.entry();
-                if entry.id == message_id {
-                    found = Some((idx, obj, entry.created_at));
-                    break;
-                }
-            }
-        }
-        let Some((pos, msg_obj, created_at)) = found else {
-            return;
-        };
-
-        if let Err(err) = self.db.edit_message_and_truncate_after(
-            &conv_id,
-            &message_id,
-            created_at,
-            &new_content,
-        ) {
-            let _ = sender.output(ChatViewOutput::ShowToast(tr_f(
-                "Failed to update message: {err}",
-                &[("err", &err.to_string())],
+        if self.active_model_id.is_none() {
+            let _ = sender.output(ChatViewOutput::ShowToast(gettext(
+                "No model selected or model file is missing. Choose a model in Settings.",
             )));
             return;
         }
 
-        let total = self.store.n_items();
-        if pos + 1 < total {
-            self.store
-                .splice(pos + 1, total - (pos + 1), &[] as &[MessageObject]);
+        let mut found: Option<(u32, i64)> = None;
+        for idx in 0..self.store.n_items() {
+            if let Some(obj) = self.store.item(idx).and_downcast::<MessageObject>() {
+                let entry = obj.entry();
+                if entry.id == message_id {
+                    found = Some((idx, entry.created_at));
+                    break;
+                }
+            }
         }
-        msg_obj.set_user_content(&new_content);
-        self.scroll_to_bottom();
-        self.start_llama_stream(&conv_id, &model_record, self.active_thinking_level, sender);
+        let Some((pos, created_at)) = found else {
+            return;
+        };
+
+        let mut history = self.capture_history_snapshot(Some(pos + 1));
+        if let Some(last) = history.last_mut() {
+            last.content = new_content.clone();
+        }
+        let prep_input = self.build_prompt_prep_input(conv_id.clone(), history);
+        let thinking_level = self.active_thinking_level;
+        let db = self.db.clone();
+        let input_sender = sender.input_sender().clone();
+        let new_content_bg = new_content.clone();
+        let message_id_bg = message_id.clone();
+
+        runtime().spawn_blocking(move || {
+            let result = (|| -> Result<PreparedPrompt, String> {
+                let prepared = prepare_prompt_blocking(&prep_input)?;
+                db.edit_message_and_truncate_after(
+                    &conv_id,
+                    &message_id_bg,
+                    created_at,
+                    &new_content_bg,
+                )
+                .map_err(|e| {
+                    tr_f(
+                        "Failed to update message: {err}",
+                        &[("err", &e.to_string())],
+                    )
+                })?;
+                Ok(prepared)
+            })();
+            let _ = input_sender.send(ChatViewMsg::EditPrepared(EditPreparedPayload {
+                conv_id: prep_input.conv_id,
+                pos,
+                message_id,
+                new_content,
+                thinking_level,
+                result,
+            }));
+        });
+    }
+
+    pub(super) fn handle_edit_prepared(
+        &mut self,
+        payload: EditPreparedPayload,
+        sender: &ComponentSender<Self>,
+    ) {
+        let EditPreparedPayload {
+            conv_id,
+            pos,
+            message_id,
+            new_content,
+            thinking_level,
+            result,
+        } = payload;
+        match result {
+            Ok(prepared) => {
+                if self.active_conversation_id.as_deref() == Some(conv_id.as_str()) {
+                    let total = self.store.n_items();
+                    if pos + 1 < total {
+                        self.store
+                            .splice(pos + 1, total - (pos + 1), &[] as &[MessageObject]);
+                    }
+                    if let Some(msg_obj) = self.store.item(pos).and_downcast::<MessageObject>()
+                        && msg_obj.with_entry(|e| e.id == message_id)
+                    {
+                        msg_obj.set_user_content(&new_content);
+                    }
+                    self.scroll_to_bottom();
+                }
+                self.start_llama_stream(
+                    StreamLaunch {
+                        conv_id,
+                        model_record: prepared.model_record,
+                        thinking_level,
+                        granted_folders: prepared.granted_folders,
+                        turns: prepared.turns,
+                        notices: prepared.notices,
+                    },
+                    sender,
+                );
+            }
+            Err(err) => {
+                let _ = sender.output(ChatViewOutput::ShowToast(err));
+            }
+        }
     }
 
     pub(super) fn handle_delete_from(
@@ -209,23 +265,46 @@ impl ChatViewModel {
             return;
         };
 
-        if let Err(err) = self
-            .db
-            .delete_message_and_after(&conv_id, &message_id, created_at)
-        {
-            let _ = sender.output(ChatViewOutput::ShowToast(tr_f(
-                "Failed to delete message: {err}",
-                &[("err", &err.to_string())],
-            )));
-            return;
-        }
+        let db = self.db.clone();
+        let input_sender = sender.input_sender().clone();
+        runtime().spawn_blocking(move || {
+            let result = db
+                .delete_message_and_after(&conv_id, &message_id, created_at)
+                .map_err(|e| {
+                    tr_f(
+                        "Failed to delete message: {err}",
+                        &[("err", &e.to_string())],
+                    )
+                });
+            let _ = input_sender.send(ChatViewMsg::DeleteCompleted {
+                conv_id,
+                pos,
+                result,
+            });
+        });
+    }
 
-        let total = self.store.n_items();
-        if pos < total {
-            self.store
-                .splice(pos, total - pos, &[] as &[MessageObject]);
+    pub(super) fn handle_delete_completed(
+        &mut self,
+        conv_id: String,
+        pos: u32,
+        result: Result<(), String>,
+        sender: &ComponentSender<Self>,
+    ) {
+        match result {
+            Ok(()) => {
+                if self.active_conversation_id.as_deref() == Some(conv_id.as_str()) {
+                    let total = self.store.n_items();
+                    if pos < total {
+                        self.store.splice(pos, total - pos, &[] as &[MessageObject]);
+                    }
+                    self.is_empty = self.store.n_items() == 0;
+                }
+            }
+            Err(err) => {
+                let _ = sender.output(ChatViewOutput::ShowToast(err));
+            }
         }
-        self.is_empty = self.store.n_items() == 0;
     }
 
     pub(super) fn load_older_page(&mut self, sender: &ComponentSender<Self>) {
@@ -254,61 +333,6 @@ impl ChatViewModel {
         });
     }
 
-    pub(super) fn resolve_active_model(&self, sender: &ComponentSender<Self>) -> Option<ModelRecord> {
-        let mut model_record = self
-            .active_model_id
-            .as_deref()
-            .and_then(|id| self.db.get_model(id).ok().flatten())
-            .filter(|m| {
-                m.file_path
-                    .as_deref()
-                    .is_some_and(|p| std::path::Path::new(p).exists())
-            });
-        if let Some(ref mut rec) = model_record
-            && !rec.supports_thinking
-            && let Some(path) = rec.file_path.as_deref()
-            && crate::models::detect_gguf_supports_thinking(std::path::Path::new(path))
-        {
-            rec.supports_thinking = true;
-            let _ = self.db.upsert_model(rec);
-        }
-        if model_record.is_none() {
-            let _ = sender.output(ChatViewOutput::ShowToast(gettext(
-                "AI model not found — download or select one in Settings → AI Models",
-            )));
-            let _ = sender.output(ChatViewOutput::OpenModelSettings);
-        }
-        model_record
-    }
-
-    pub(super) fn empty_description(&self) -> String {
-        let name = self.assistant_name.borrow();
-        tr_f(
-            "Ask {name} anything, or share a file or image below.",
-            &[("name", &name)],
-        )
-    }
-
-    pub(super) fn scroll_to_bottom(&self) {
-        let count = self.store.n_items();
-        if count == 0 {
-            return;
-        }
-        let last_idx = count - 1;
-        let scroller = self.scrolled_window.clone();
-        let list = self.message_list.clone();
-        glib::idle_add_local_once(move || {
-            list.scroll_to(last_idx, gtk::ListScrollFlags::NONE, None);
-            scroll_scroller_to_bottom(&scroller);
-            let scroller2 = scroller.clone();
-            let list2 = list.clone();
-            glib::timeout_add_local_once(Duration::from_millis(60), move || {
-                list2.scroll_to(last_idx, gtk::ListScrollFlags::NONE, None);
-                scroll_scroller_to_bottom(&scroller2);
-            });
-        });
-    }
-
     pub(super) fn cancel_active_stream(&mut self, sender: &ComponentSender<Self>) {
         if let Some(conv_id) = self.active_conversation_id.clone() {
             self.cancel_run_for(&conv_id, sender);
@@ -320,8 +344,11 @@ impl ChatViewModel {
         if let Some(run) = self.active_runs.borrow_mut().remove(conv_id) {
             run.cancel_flag.store(true, Ordering::Relaxed);
             let entry = run.stream_obj.entry();
-            run.stream_obj
-                .update_streaming(&entry.content, entry.reasoning_content.as_deref(), false);
+            run.stream_obj.update_streaming(
+                &entry.content,
+                entry.reasoning_content.as_deref(),
+                false,
+            );
             let _ = sender.output(ChatViewOutput::ChatRunningChanged {
                 conversation_id: conv_id.to_string(),
                 is_running: false,
@@ -334,8 +361,11 @@ impl ChatViewModel {
         for (conv_id, run) in runs {
             run.cancel_flag.store(true, Ordering::Relaxed);
             let entry = run.stream_obj.entry();
-            run.stream_obj
-                .update_streaming(&entry.content, entry.reasoning_content.as_deref(), false);
+            run.stream_obj.update_streaming(
+                &entry.content,
+                entry.reasoning_content.as_deref(),
+                false,
+            );
             let _ = sender.output(ChatViewOutput::ChatRunningChanged {
                 conversation_id: conv_id,
                 is_running: false,

@@ -2,6 +2,7 @@
 
 mod bind;
 mod blocks;
+mod widget;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -19,6 +20,7 @@ use crate::ui::widgets::present_destructive_confirm;
 
 use bind::bind_entry;
 use blocks::update_blocks_box;
+use widget::MessageRowWidget;
 
 #[derive(Clone)]
 pub(super) struct RowWidgets {
@@ -42,25 +44,6 @@ pub(super) struct RowWidgets {
     pub(super) rendered_is_dark: Rc<Cell<bool>>,
 }
 
-type SignalSlot = Rc<RefCell<Option<(MessageObject, glib::SignalHandlerId)>>>;
-
-const ROW_WIDGETS_KEY: &str = "row-widgets";
-const SIGNAL_SLOT_KEY: &str = "signal-slot";
-
-fn get_row_widgets(clamp: &adw::Clamp) -> Option<RowWidgets> {
-    unsafe { clamp.data::<RowWidgets>(ROW_WIDGETS_KEY) }.map(|ptr| unsafe { ptr.as_ref().clone() })
-}
-
-fn get_signal_slot(clamp: &adw::Clamp) -> Option<SignalSlot> {
-    unsafe { clamp.data::<SignalSlot>(SIGNAL_SLOT_KEY) }.map(|ptr| unsafe { ptr.as_ref().clone() })
-}
-
-fn disconnect_slot(slot: &SignalSlot) {
-    if let Some((prev_obj, prev_id)) = slot.borrow_mut().take() {
-        prev_obj.disconnect(prev_id);
-    }
-}
-
 /// Build the [`gtk::SignalListItemFactory`] used by the virtualized chat `ListView`.
 pub fn build_message_list_factory(
     assistant_name: Rc<RefCell<String>>,
@@ -71,9 +54,9 @@ pub fn build_message_list_factory(
     let factory = gtk::SignalListItemFactory::new();
 
     factory.connect_setup(move |_, obj| {
-        let list_item = obj
-            .downcast_ref::<gtk::ListItem>()
-            .expect("ListItem expected");
+        let Some(list_item) = obj.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
         list_item.set_activatable(false);
         list_item.set_selectable(false);
 
@@ -82,61 +65,51 @@ pub fn build_message_list_factory(
             .tightening_threshold(560)
             .build();
         let widgets = build_row_widgets(&clamp, &on_edit, &on_delete);
-        attach_theme_listener(&clamp, &widgets);
-
-        let handler_slot: SignalSlot = Rc::new(RefCell::new(None));
-        unsafe {
-            clamp.set_data(ROW_WIDGETS_KEY, widgets);
-            clamp.set_data(SIGNAL_SLOT_KEY, handler_slot);
-        }
-        list_item.set_child(Some(&clamp));
+        let theme_id = attach_theme_listener(&widgets);
+        let row_widget = MessageRowWidget::new(&clamp, widgets, theme_id);
+        list_item.set_child(Some(&row_widget));
     });
 
     {
         let assistant_name = assistant_name.clone();
         let user_name = user_name.clone();
         factory.connect_bind(move |_, obj| {
-            let list_item = obj
-                .downcast_ref::<gtk::ListItem>()
-                .expect("ListItem expected");
+            let Some(list_item) = obj.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
             let Some(msg_obj) = list_item.item().and_downcast::<MessageObject>() else {
                 return;
             };
-            let Some(clamp) = list_item.child().and_downcast::<adw::Clamp>() else {
+            let Some(row_widget) = list_item.child().and_downcast::<MessageRowWidget>() else {
                 return;
             };
-            let Some(widgets) = get_row_widgets(&clamp) else {
+            let Some(widgets) = row_widget.row_widgets() else {
                 return;
             };
 
-            bind_entry(&widgets, &msg_obj, &assistant_name, &user_name);
+            bind_entry(widgets, &msg_obj, &assistant_name, &user_name);
 
-            if let Some(slot) = get_signal_slot(&clamp) {
-                disconnect_slot(&slot);
-                let widgets_clone = widgets.clone();
-                let msg_clone = msg_obj.clone();
-                let name_clone = assistant_name.clone();
-                let uname_clone = user_name.clone();
-                let id = msg_obj.connect_local("updated", false, move |_| {
-                    bind_entry(&widgets_clone, &msg_clone, &name_clone, &uname_clone);
-                    None
-                });
-                *slot.borrow_mut() = Some((msg_obj, id));
-            }
+            let widgets_clone = widgets.clone();
+            let msg_clone = msg_obj.clone();
+            let name_clone = assistant_name.clone();
+            let uname_clone = user_name.clone();
+            let id = msg_obj.connect_local("updated", false, move |_| {
+                bind_entry(&widgets_clone, &msg_clone, &name_clone, &uname_clone);
+                None
+            });
+            row_widget.bind_signal(msg_obj, id);
         });
     }
 
     factory.connect_unbind(|_, obj| {
-        let list_item = obj
-            .downcast_ref::<gtk::ListItem>()
-            .expect("ListItem expected");
-        let Some(clamp) = list_item.child().and_downcast::<adw::Clamp>() else {
+        let Some(list_item) = obj.downcast_ref::<gtk::ListItem>() else {
             return;
         };
-        if let Some(slot) = get_signal_slot(&clamp) {
-            disconnect_slot(&slot);
-        }
-        if let Some(widgets) = get_row_widgets(&clamp) {
+        let Some(row_widget) = list_item.child().and_downcast::<MessageRowWidget>() else {
+            return;
+        };
+        row_widget.unbind_signal();
+        if let Some(widgets) = row_widget.row_widgets() {
             *widgets.active_msg_obj.borrow_mut() = None;
             widgets.rendered_message_id.borrow_mut().clear();
             widgets.rendered_blocks.borrow_mut().clear();
@@ -355,12 +328,12 @@ fn build_actions_box(
     (actions_box, edit_btn, delete_btn, copy_btn)
 }
 
-fn attach_theme_listener(clamp: &adw::Clamp, widgets: &RowWidgets) {
+fn attach_theme_listener(widgets: &RowWidgets) -> glib::SignalHandlerId {
     let active_msg_obj = widgets.active_msg_obj.clone();
     let rendered_blocks = widgets.rendered_blocks.clone();
     let rendered_is_dark = widgets.rendered_is_dark.clone();
     let blocks_weak = widgets.blocks_box.downgrade();
-    let theme_handler_id = adw::StyleManager::default().connect_dark_notify(move |mgr| {
+    adw::StyleManager::default().connect_dark_notify(move |mgr| {
         let Some(blocks_box) = blocks_weak.upgrade() else {
             return;
         };
@@ -376,11 +349,5 @@ fn attach_theme_listener(clamp: &adw::Clamp, widgets: &RowWidgets) {
             mgr.is_dark(),
             entry.is_streaming,
         );
-    });
-    let theme_handler_slot = Rc::new(RefCell::new(Some(theme_handler_id)));
-    clamp.connect_destroy(move |_| {
-        if let Some(id) = theme_handler_slot.borrow_mut().take() {
-            adw::StyleManager::default().disconnect(id);
-        }
-    });
+    })
 }

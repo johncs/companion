@@ -1,4 +1,4 @@
-//! Core tool abstractions (`Tool`, `ToolRisk`, `ToolContext`, `ApprovalRequest`).
+//! Core tool abstractions (`Tool`, `ToolRisk`, `ToolContext`, `ToolAuthorization`).
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -7,10 +7,13 @@ use std::pin::Pin;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::approval::ApprovalResponse;
+use crate::permissions::PermissionEngine;
 use crate::tools::GrantedFolder;
-use companion_core::types::SearchEngine;
+use companion_core::i18n::tr_f;
+use companion_core::types::{SearchEngine, ToolCallStatus};
 
-/// Boxed future returned by async [`Tool::execute`] implementations.
+/// Boxed future returned by async [`Tool`] methods.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Risk classification controlling permission prompts and session auto-allow rules.
@@ -26,12 +29,41 @@ pub enum ToolRisk {
     Network,
 }
 
-/// Runtime context supplied to tools during preview and execution.
+/// Pre-flight context supplied to [`Tool::prepare`] before prompting the user.
+pub struct ToolPrepareContext<'a> {
+    pub conv_id: &'a str,
+    pub granted_folders: &'a [GrantedFolder],
+    pub permissions: &'a PermissionEngine,
+    pub web_search_enabled: bool,
+    pub search_engine: SearchEngine,
+    pub searxng_url: Option<&'a str>,
+    pub local_texts: &'a [String],
+}
+
+/// Runtime context supplied to [`Tool::execute_approved`].
 pub struct ToolContext<'a> {
     pub granted_folders: &'a [GrantedFolder],
     pub web_search_enabled: bool,
     pub search_engine: SearchEngine,
     pub searxng_url: Option<&'a str>,
+}
+
+/// Pre-flight authorization decision returned by [`Tool::prepare`].
+#[derive(Debug, Clone)]
+pub enum ToolAuthorization {
+    /// Allowed immediately without prompting.
+    AutoAllowed,
+    /// Rejected before prompting (e.g., disabled feature, invalid URL, missing arg).
+    Rejected {
+        status: ToolCallStatus,
+        reason: String,
+    },
+    /// Requires user confirmation via `ApprovalHandler`.
+    RequiresApproval {
+        request: ApprovalRequest,
+        ungranted_path: Option<PathBuf>,
+        write_target_folder: Option<PathBuf>,
+    },
 }
 
 /// Structured user approval request emitted before executing sensitive tools.
@@ -60,21 +92,29 @@ pub enum ApprovalRequest {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn risk(&self) -> ToolRisk;
-    fn describe(&self, ctx: &ToolContext<'_>, args: &Value) -> String;
 
-    /// Raw path/root argument used to detect ungranted absolute paths outside granted folders.
-    fn raw_target_path<'a>(&self, _args: &'a Value) -> Option<&'a str> {
-        None
+    /// Validate arguments and compute authorization/approval requirements before execution.
+    fn prepare<'a>(
+        &'a self,
+        ctx: &'a ToolPrepareContext<'a>,
+        args: &'a Value,
+    ) -> BoxFuture<'a, ToolAuthorization>;
+
+    /// Human-readable status banner emitted while executing this tool.
+    fn status_message(&self, _ctx: &ToolContext<'_>) -> String {
+        tr_f("Running {tool}…", &[("tool", self.name())])
     }
 
-    /// Return `true` if the tool targets a folder/file already granted with write access.
-    fn is_write_already_granted(&self, _granted_folders: &[GrantedFolder], _args: &Value) -> bool {
-        false
+    /// Message returned to the model if the user denies approval.
+    fn denied_message(&self) -> &'static str {
+        "User denied permission."
     }
 
-    fn execute<'a>(
+    /// Execute the tool after authorization (using any user-edited approval payload).
+    fn execute_approved<'a>(
         &'a self,
         ctx: &'a ToolContext<'a>,
         args: &'a Value,
+        approval: &'a ApprovalResponse,
     ) -> BoxFuture<'a, Result<String>>;
 }

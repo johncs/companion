@@ -57,7 +57,10 @@ impl Database {
 
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(message_ids.iter()), map_attachment)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(message_ids.iter()),
+                map_attachment,
+            )?;
             for row in rows {
                 let att = row?;
                 map.entry(att.message_id.clone()).or_default().push(att);

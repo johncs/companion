@@ -5,8 +5,8 @@ use crate::tools::GrantedFolder;
 use crate::{WEB_SEARCH_TOOL_INSTRUCTIONS, WORKSPACE_TOOLS_INSTRUCTIONS};
 use companion_core::attachments::format_attachments_for_prompt;
 use companion_core::prompt::compose_personalized_system_prompt;
-use companion_core::types::MessageRole;
 use companion_core::provider::{ChatRole, ChatTurn};
+use companion_core::types::MessageRole;
 use companion_storage::AttachmentRecord;
 use companion_storage::settings::PersonalizationSettings;
 
@@ -62,10 +62,8 @@ pub fn build_prompt_turns(ctx: &PromptContext<'_>) -> Vec<ChatTurn> {
 }
 
 fn append_folder_context(sys_prompt: &mut String, granted_folders: &[GrantedFolder]) {
-    let existing: Vec<&GrantedFolder> = granted_folders
-        .iter()
-        .filter(|g| g.path.exists())
-        .collect();
+    let existing: Vec<&GrantedFolder> =
+        granted_folders.iter().filter(|g| g.path.exists()).collect();
     if existing.is_empty() {
         sys_prompt.push_str("\n\nNo folders or files are currently granted for this chat.\n\n");
         sys_prompt.push_str(WORKSPACE_TOOLS_INSTRUCTIONS);
@@ -143,9 +141,9 @@ fn append_mentioned_os_paths(turns: &mut [ChatTurn]) {
         && let Some(sys_turn) = turns.first_mut()
         && matches!(sys_turn.role, ChatRole::System)
     {
-        sys_turn
-            .content
-            .push_str("\n\nUser-mentioned OS paths (ask permission via tool call before reading):\n");
+        sys_turn.content.push_str(
+            "\n\nUser-mentioned OS paths (ask permission via tool call before reading):\n",
+        );
         for d in &mentioned_dirs {
             sys_turn.content.push_str(&format!("- {d}\n"));
         }
@@ -230,9 +228,11 @@ mod tests {
             web_search_active: false,
             history: &[],
         });
-        assert!(empty_turns[0]
-            .content
-            .contains("No folders or files are currently granted"));
+        assert!(
+            empty_turns[0]
+                .content
+                .contains("No folders or files are currently granted")
+        );
         assert!(!empty_turns[0].content.contains("Web Search is enabled"));
 
         let _ = std::fs::remove_dir_all(&dir);

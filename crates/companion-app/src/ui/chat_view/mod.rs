@@ -5,10 +5,10 @@ mod approval;
 mod handlers;
 mod message_actions;
 mod page_loader;
+mod setup;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -20,79 +20,16 @@ use crate::core::ThinkingLevel;
 use crate::core::prompt::default_system_prompt;
 use crate::i18n::gettext;
 use crate::inference::llama_cpp::LlamaCppProvider;
-use crate::storage::{AttachmentRecord, Database};
-use crate::ui::composer::{ComposerModel, ComposerMsg, ComposerOutput};
+use crate::storage::Database;
+use crate::ui::composer::{ComposerModel, ComposerMsg};
 use crate::ui::message_object::MessageObject;
-use crate::ui::message_row::build_message_list_factory;
 
 pub use page_loader::LoadedPageData;
+pub use setup::{ChatViewMsg, ChatViewOutput};
 
 use agent_runner::ActiveChatRun;
 use handlers::attach_drop_overlay;
-
-#[derive(Debug)]
-pub enum ChatViewMsg {
-    LoadConversation {
-        conversation_id: String,
-        title: String,
-    },
-    ConversationPageLoaded {
-        conversation_id: String,
-        request_seq: u64,
-        result: Result<LoadedPageData, String>,
-    },
-    ClearConversation,
-    CancelConversation(String),
-    OpenFolderPermissions,
-    GrantFolder(PathBuf),
-    RefreshGrantedFolders,
-    SendMessage {
-        text: String,
-        thinking_level: ThinkingLevel,
-        attachments: Vec<AttachmentRecord>,
-    },
-    EditAndResendMessage {
-        message_id: String,
-        new_content: String,
-    },
-    DeleteMessageFrom(String),
-    StopGeneration,
-    LoadOlderPage,
-    OlderPageLoaded {
-        conversation_id: String,
-        request_seq: u64,
-        result: Result<LoadedPageData, String>,
-    },
-    SystemPromptChanged(String),
-    ThinkingLevelChanged(ThinkingLevel),
-    WebSearchToggled(bool),
-    RefreshWebSearchGlobal(bool),
-    RefreshModels(Option<String>),
-    PersonalizationChanged {
-        assistant_name: String,
-        user_name: Option<String>,
-    },
-    ConversationTitleUpdated {
-        id: String,
-        title: String,
-    },
-    OpenModelSettings,
-    ShowToast(String),
-}
-
-#[derive(Debug)]
-pub enum ChatViewOutput {
-    ShowToast(String),
-    ConversationTitleUpdated {
-        id: String,
-        title: String,
-    },
-    ChatRunningChanged {
-        conversation_id: String,
-        is_running: bool,
-    },
-    OpenModelSettings,
-}
+use setup::{build_chat_composer, build_chat_list_factory};
 
 pub struct ChatViewModel {
     db: Database,
@@ -117,6 +54,7 @@ pub struct ChatViewModel {
     load_seq: u64,
     is_loading: bool,
     is_empty: bool,
+    next_run_id: u64,
     active_runs: Rc<RefCell<HashMap<String, ActiveChatRun>>>,
 }
 
@@ -237,52 +175,15 @@ impl SimpleComponent for ChatViewModel {
                 .unwrap_or_else(|_| "Companion".to_string()),
         ));
         let user_name = Rc::new(RefCell::new(db.get_user_name().ok().flatten()));
-        let edit_sender = sender.input_sender().clone();
-        let delete_sender = sender.input_sender().clone();
-        let factory = build_message_list_factory(
-            assistant_name.clone(),
-            user_name.clone(),
-            Rc::new(move |message_id, new_content| {
-                let _ = edit_sender.send(ChatViewMsg::EditAndResendMessage {
-                    message_id,
-                    new_content,
-                });
-            }),
-            Rc::new(move |message_id| {
-                let _ = delete_sender.send(ChatViewMsg::DeleteMessageFrom(message_id));
-            }),
-        );
-
-        let composer = ComposerModel::builder()
-            .launch((db.clone(), active_model_id.clone()))
-            .forward(sender.input_sender(), |output| match output {
-                ComposerOutput::Send {
-                    text,
-                    thinking_level,
-                    attachments,
-                } => ChatViewMsg::SendMessage {
-                    text,
-                    thinking_level,
-                    attachments,
-                },
-                ComposerOutput::StopRequested => ChatViewMsg::StopGeneration,
-                ComposerOutput::OpenFolderPermissions => ChatViewMsg::OpenFolderPermissions,
-                ComposerOutput::GrantFolder(path) => ChatViewMsg::GrantFolder(path),
-                ComposerOutput::WebSearchToggled(enabled) => ChatViewMsg::WebSearchToggled(enabled),
-                ComposerOutput::SystemPromptChanged(p) => ChatViewMsg::SystemPromptChanged(p),
-                ComposerOutput::ThinkingLevelChanged(lvl) => {
-                    ChatViewMsg::ThinkingLevelChanged(lvl)
-                }
-                ComposerOutput::OpenModelSettings => ChatViewMsg::OpenModelSettings,
-                ComposerOutput::ShowToast(msg) => ChatViewMsg::ShowToast(msg),
-            });
+        let factory = build_chat_list_factory(assistant_name.clone(), user_name.clone(), &sender);
+        let composer = build_chat_composer(db.clone(), active_model_id.clone(), &sender);
 
         let scrolled_window = gtk::ScrolledWindow::new();
         let message_list = gtk::ListView::new(Some(selection), Some(factory));
 
         let model = Self {
             db,
-            provider: LlamaCppProvider::new(),
+            provider: LlamaCppProvider::new(crate::core::runtime().handle().clone()),
             permissions: PermissionEngine::new(),
             store,
             scrolled_window: scrolled_window.clone(),
@@ -303,6 +204,7 @@ impl SimpleComponent for ChatViewModel {
             load_seq: 0,
             is_loading: false,
             is_empty: true,
+            next_run_id: 0,
             active_runs: Rc::new(RefCell::new(HashMap::new())),
         };
 
@@ -316,7 +218,11 @@ impl SimpleComponent for ChatViewModel {
             }
         });
 
-        attach_drop_overlay(&widgets.root_overlay, &widgets.drop_overlay, model.composer.sender());
+        attach_drop_overlay(
+            &widgets.root_overlay,
+            &widgets.drop_overlay,
+            model.composer.sender(),
+        );
         ComponentParts { model, widgets }
     }
 
@@ -346,10 +252,24 @@ impl SimpleComponent for ChatViewModel {
             } => self.on_older_page_loaded(conversation_id, request_seq, result),
             ChatViewMsg::OpenFolderPermissions => self.on_open_folder_permissions(&sender),
             ChatViewMsg::GrantFolder(path) => self.handle_grant_folder(path, &sender),
+            ChatViewMsg::PresentGrantFolderDialog {
+                folder_name,
+                folder_str,
+            } => self.present_grant_folder_dialog(folder_name, folder_str, &sender),
             ChatViewMsg::RefreshGrantedFolders => {
-                if let Some(conv_id) = &self.active_conversation_id {
-                    let granted = self.db.list_conversation_folders(conv_id).unwrap_or_default();
-                    self.composer.emit(ComposerMsg::SetGrantedFolders(granted));
+                if let Some(conv_id) = self.active_conversation_id.clone() {
+                    let db = self.db.clone();
+                    let input_sender = sender.input_sender().clone();
+                    crate::core::runtime().spawn_blocking(move || {
+                        let folders = db.list_conversation_folders(&conv_id).unwrap_or_default();
+                        let _ = input_sender
+                            .send(ChatViewMsg::GrantedFoldersLoaded { conv_id, folders });
+                    });
+                }
+            }
+            ChatViewMsg::GrantedFoldersLoaded { conv_id, folders } => {
+                if self.active_conversation_id.as_deref() == Some(conv_id.as_str()) {
+                    self.composer.emit(ComposerMsg::SetGrantedFolders(folders));
                 }
             }
             ChatViewMsg::SendMessage {
@@ -357,32 +277,52 @@ impl SimpleComponent for ChatViewModel {
                 thinking_level,
                 attachments,
             } => self.handle_send_message(text, thinking_level, attachments, &sender),
+            ChatViewMsg::SendPrepared {
+                conv_id,
+                thinking_level,
+                result,
+            } => self.handle_send_prepared(conv_id, thinking_level, result, &sender),
             ChatViewMsg::EditAndResendMessage {
                 message_id,
                 new_content,
             } => self.handle_edit_and_resend(message_id, new_content, &sender),
+            ChatViewMsg::EditPrepared(payload) => {
+                self.handle_edit_prepared(payload, &sender);
+            }
             ChatViewMsg::DeleteMessageFrom(message_id) => {
                 self.handle_delete_from(message_id, &sender);
             }
+            ChatViewMsg::DeleteCompleted {
+                conv_id,
+                pos,
+                result,
+            } => self.handle_delete_completed(conv_id, pos, result, &sender),
             ChatViewMsg::StopGeneration => self.cancel_active_stream(&sender),
             ChatViewMsg::SystemPromptChanged(prompt) => {
                 self.active_system_prompt = prompt.clone();
-                if let Some(conv_id) = &self.active_conversation_id {
-                    let _ = self.db.set_conversation_system_prompt(conv_id, Some(&prompt));
+                if let Some(conv_id) = self.active_conversation_id.clone() {
+                    let db = self.db.clone();
+                    crate::core::runtime().spawn_blocking(move || {
+                        let _ = db.set_conversation_system_prompt(&conv_id, Some(&prompt));
+                    });
                 }
             }
             ChatViewMsg::ThinkingLevelChanged(level) => {
                 self.active_thinking_level = level;
-                if let Some(conv_id) = &self.active_conversation_id {
-                    let _ = self.db.set_conversation_thinking_level(conv_id, level);
+                if let Some(conv_id) = self.active_conversation_id.clone() {
+                    let db = self.db.clone();
+                    crate::core::runtime().spawn_blocking(move || {
+                        let _ = db.set_conversation_thinking_level(&conv_id, level);
+                    });
                 }
             }
             ChatViewMsg::WebSearchToggled(enabled) => {
                 self.web_search_enabled = enabled;
-                if let Some(conv_id) = &self.active_conversation_id {
-                    let _ = self
-                        .db
-                        .set_conversation_web_search_enabled(conv_id, enabled);
+                if let Some(conv_id) = self.active_conversation_id.clone() {
+                    let db = self.db.clone();
+                    crate::core::runtime().spawn_blocking(move || {
+                        let _ = db.set_conversation_web_search_enabled(&conv_id, enabled);
+                    });
                 }
             }
             ChatViewMsg::RefreshWebSearchGlobal(enabled) => {
@@ -408,4 +348,3 @@ impl SimpleComponent for ChatViewModel {
         }
     }
 }
-

@@ -5,7 +5,7 @@ mod download_tracker;
 mod repo_rows;
 mod starter_models;
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -21,7 +21,7 @@ use crate::ui::widgets::clear_preferences_group;
 
 use repo_rows::build_hf_repo_row;
 
-pub use download_controls::{DownloadControls, DownloadTracker};
+pub use download_controls::{DownloadControls, DownloadTracker, subscribe_download_lifecycle};
 pub use download_tracker::restore_pending_downloads;
 pub use starter_models::build_starter_model_group;
 
@@ -65,7 +65,9 @@ pub fn build_explore_subpage_with_query(
     let page = adw::PreferencesPage::new();
     let discover_group = adw::PreferencesGroup::builder()
         .title(gettext("Discover on Hugging Face"))
-        .description(gettext("Search and download AI models directly into Companion."))
+        .description(gettext(
+            "Search and download AI models directly into Companion.",
+        ))
         .build();
 
     let search_row = gtk::Box::builder()
@@ -118,16 +120,31 @@ fn build_search_runner(
     results_group: adw::PreferencesGroup,
     ctx: HfBrowserContext,
 ) -> Rc<dyn Fn(String)> {
-    let search_weak: Rc<RefCell<Option<Rc<dyn Fn(String)>>>> = Rc::new(RefCell::new(None));
-    let search_weak_inner = search_weak.clone();
+    let runner = Rc::new(SearchRunner {
+        results_group,
+        ctx,
+        search_seq: Cell::new(0),
+    });
+    Rc::new(move |query: String| runner.run(query))
+}
 
-    let func: Rc<dyn Fn(String)> = Rc::new(move |query: String| {
-        clear_preferences_group(&results_group);
+struct SearchRunner {
+    results_group: adw::PreferencesGroup,
+    ctx: HfBrowserContext,
+    search_seq: Cell<u64>,
+}
+
+impl SearchRunner {
+    fn run(self: &Rc<Self>, query: String) {
+        clear_preferences_group(&self.results_group);
         let loading = adw::ActionRow::builder()
             .title(gettext("Searching Hugging Face…"))
             .sensitive(false)
             .build();
-        results_group.add(&loading);
+        self.results_group.add(&loading);
+
+        let req_seq = self.search_seq.get().wrapping_add(1);
+        self.search_seq.set(req_seq);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let query_for_task = query.clone();
@@ -135,47 +152,42 @@ fn build_search_runner(
             let _ = tx.send(search_gguf_repos(&query_for_task, 12).await);
         });
 
-        let results_group = results_group.clone();
-        let ctx = ctx.clone();
-        let search_weak_inner = search_weak_inner.clone();
-
+        let runner = Rc::clone(self);
         glib::MainContext::default().spawn_local(async move {
             let res = rx.await;
-            clear_preferences_group(&results_group);
+            if runner.search_seq.get() != req_seq {
+                return;
+            }
+            clear_preferences_group(&runner.results_group);
             match res {
                 Ok(Ok(repos)) if repos.is_empty() => {
                     let empty = adw::ActionRow::builder()
                         .title(gettext("No AI model repositories found"))
                         .sensitive(false)
                         .build();
-                    results_group.add(&empty);
+                    runner.results_group.add(&empty);
                 }
                 Ok(Ok(repos)) => {
                     for repo in repos {
-                        results_group.add(&build_hf_repo_row(&repo, &ctx));
+                        runner
+                            .results_group
+                            .add(&build_hf_repo_row(&repo, &runner.ctx));
                     }
                 }
                 Ok(Err(err)) => {
-                    let error_row = build_search_error_row(&err.to_string(), &query, &search_weak_inner);
-                    results_group.add(&error_row);
+                    let error_row = build_search_error_row(&err.to_string(), &query, &runner);
+                    runner.results_group.add(&error_row);
                 }
                 Err(_) => {}
             }
         });
-    });
-
-    *search_weak.borrow_mut() = Some(func.clone());
-    func
+    }
 }
 
-fn build_search_error_row(
-    err_msg: &str,
-    query: &str,
-    search_weak: &Rc<RefCell<Option<Rc<dyn Fn(String)>>>>,
-) -> adw::ActionRow {
+fn build_search_error_row(err_msg: &str, query: &str, runner: &Rc<SearchRunner>) -> adw::ActionRow {
     let error_row = adw::ActionRow::builder()
         .title(gettext("Could not reach Hugging Face"))
-        .subtitle(err_msg)
+        .subtitle(crate::core::markdown::escape_pango_markup(err_msg))
         .build();
     error_row.add_prefix(&gtk::Image::from_icon_name("network-offline-symbolic"));
     let retry_btn = gtk::Button::builder()
@@ -185,11 +197,9 @@ fn build_search_error_row(
         .css_classes(["flat", "circular"])
         .build();
     let q_retry = query.to_string();
-    let weak = search_weak.clone();
+    let runner_clone = Rc::clone(runner);
     retry_btn.connect_clicked(move |_| {
-        if let Some(f) = weak.borrow().as_ref() {
-            f(q_retry.clone());
-        }
+        runner_clone.run(q_retry.clone());
     });
     error_row.add_suffix(&retry_btn);
     error_row

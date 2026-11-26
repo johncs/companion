@@ -16,12 +16,9 @@ use super::HfBrowserContext;
 use super::download_controls::DownloadControls;
 use super::download_tracker::{RowDownloadUi, start_hf_download};
 
-pub(super) fn build_hf_repo_row(
-    repo: &HfRepoSummary,
-    ctx: &HfBrowserContext,
-) -> adw::ExpanderRow {
+pub(super) fn build_hf_repo_row(repo: &HfRepoSummary, ctx: &HfBrowserContext) -> adw::ExpanderRow {
     let expander = adw::ExpanderRow::builder()
-        .title(&repo.id)
+        .title(crate::core::markdown::escape_pango_markup(&repo.id))
         .subtitle(tr_f(
             "{downloads} downloads · {likes} likes",
             &[
@@ -71,10 +68,10 @@ pub(super) fn build_hf_repo_row(
                 }
                 Ok(Err(err)) => {
                     *loaded_flag.borrow_mut() = false;
-                    placeholder.set_title(&tr_f(
+                    placeholder.set_title(&crate::core::markdown::escape_pango_markup(&tr_f(
                         "Failed to load files (re-expand to retry): {err}",
                         &[("err", &err.to_string())],
-                    ));
+                    )));
                 }
                 Err(_) => {
                     *loaded_flag.borrow_mut() = false;
@@ -136,8 +133,10 @@ fn build_hf_file_row(
     }
 
     let row = adw::ActionRow::builder()
-        .title(&file.filename)
-        .subtitle(subtitle_parts.join(" · "))
+        .title(crate::core::markdown::escape_pango_markup(&file.filename))
+        .subtitle(crate::core::markdown::escape_pango_markup(
+            &subtitle_parts.join(" · "),
+        ))
         .build();
 
     let controls = DownloadControls::new();
@@ -148,34 +147,12 @@ fn build_hf_file_row(
         .css_classes(["flat", "circular"])
         .build();
 
-    let on_pause_handler: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    let on_cancel_handler: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-
-    {
-        let on_pause = on_pause_handler.clone();
-        controls.pause_btn.connect_clicked(move |_| {
-            if let Some(cb) = on_pause.borrow().clone() {
-                cb();
-            }
-        });
-    }
-    {
-        let on_cancel = on_cancel_handler.clone();
-        controls.cancel_btn.connect_clicked(move |_| {
-            if let Some(cb) = on_cancel.borrow().clone() {
-                cb();
-            }
-        });
-    }
-
     {
         let repo_id = repo_id.to_string();
         let filename = file.filename.clone();
         let mmproj_name = mmproj_file.map(|m| m.filename.clone());
         let ctx = ctx.clone();
         let controls = controls.clone();
-        let on_pause = on_pause_handler.clone();
-        let on_cancel = on_cancel_handler.clone();
 
         download_btn.connect_clicked(move |btn| {
             start_hf_download(
@@ -186,8 +163,6 @@ fn build_hf_file_row(
                 RowDownloadUi {
                     btn: btn.clone(),
                     controls: controls.clone(),
-                    on_pause: on_pause.clone(),
-                    on_cancel: on_cancel.clone(),
                 },
             );
         });

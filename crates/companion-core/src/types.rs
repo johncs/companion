@@ -191,8 +191,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn domain_enums_round_trip_and_handle_unknowns() {
-        for r in [MessageRole::System, MessageRole::User, MessageRole::Assistant] {
+    fn domain_enums_round_trip() {
+        for r in [
+            MessageRole::System,
+            MessageRole::User,
+            MessageRole::Assistant,
+        ] {
             assert_eq!(MessageRole::from_str_lossy(r.as_str()), r);
         }
         assert_eq!(MessageRole::from_str_lossy("model"), MessageRole::Assistant);
@@ -203,7 +207,11 @@ mod tests {
         assert!(FolderPermission::ReadWrite.allows_write());
         assert!(!FolderPermission::Read.allows_write());
 
-        for s in [ToolCallStatus::Ok, ToolCallStatus::Denied, ToolCallStatus::Error] {
+        for s in [
+            ToolCallStatus::Ok,
+            ToolCallStatus::Denied,
+            ToolCallStatus::Error,
+        ] {
             assert_eq!(ToolCallStatus::from_str_lossy(s.as_str()), s);
         }
 
@@ -222,9 +230,14 @@ mod tests {
         for eng in [SearchEngine::DuckDuckGo, SearchEngine::SearXNG] {
             assert_eq!(SearchEngine::from_str_lossy(eng.as_str()), eng);
         }
+    }
 
-        // Case-insensitivity, whitespace trimming, and unknown fallbacks.
-        assert_eq!(MessageRole::from_str_lossy("  ASSISTANT "), MessageRole::Assistant);
+    #[test]
+    fn domain_enums_handle_unknown_inputs() {
+        assert_eq!(
+            MessageRole::from_str_lossy("  ASSISTANT "),
+            MessageRole::Assistant
+        );
         assert_eq!(MessageRole::from_str_lossy("unknown"), MessageRole::User);
         assert_eq!(
             FolderPermission::from_str_lossy(" READ_WRITE "),
@@ -234,7 +247,10 @@ mod tests {
             FolderPermission::from_str_lossy("invalid"),
             FolderPermission::Read
         );
-        assert_eq!(ToolCallStatus::from_str_lossy(" DENIED "), ToolCallStatus::Denied);
+        assert_eq!(
+            ToolCallStatus::from_str_lossy(" DENIED "),
+            ToolCallStatus::Denied
+        );
         assert_eq!(ToolCallStatus::from_str_lossy("weird"), ToolCallStatus::Ok);
         assert_eq!(
             PermissionDecision::from_str_lossy(" Allow_Chat "),
@@ -244,9 +260,18 @@ mod tests {
             PermissionDecision::from_str_lossy("unknown"),
             PermissionDecision::Deny
         );
-        assert_eq!(ExecutionDevice::from_str_lossy(" GPU "), ExecutionDevice::Gpu);
+        assert_eq!(
+            ExecutionDevice::from_str_lossy(" GPU "),
+            ExecutionDevice::Gpu
+        );
         assert_eq!(ExecutionDevice::from_str_lossy("tpu"), ExecutionDevice::Cpu);
-        assert_eq!(SearchEngine::from_str_lossy(" SearXNG "), SearchEngine::SearXNG);
-        assert_eq!(SearchEngine::from_str_lossy("other"), SearchEngine::DuckDuckGo);
+        assert_eq!(
+            SearchEngine::from_str_lossy(" SearXNG "),
+            SearchEngine::SearXNG
+        );
+        assert_eq!(
+            SearchEngine::from_str_lossy("other"),
+            SearchEngine::DuckDuckGo
+        );
     }
 }

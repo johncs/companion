@@ -59,7 +59,9 @@ pub(super) fn remove_managed_entry(managed_dir: &Path, path: &Path, other_models
     }
     let path_in_use = |target: &Path| {
         other_models.iter().any(|m| {
-            m.file_path.as_deref().is_some_and(|p| Path::new(p) == target)
+            m.file_path
+                .as_deref()
+                .is_some_and(|p| Path::new(p) == target)
                 || m.mmproj_path
                     .as_deref()
                     .is_some_and(|p| Path::new(p) == target)
@@ -128,7 +130,10 @@ mod tests {
         for i in 0..5 {
             let p = dir.join(format!("m{i}.gguf"));
             std::fs::write(&p, vec![7u8; (i + 1) * 10]).unwrap();
-            models.push(dummy_model(&format!("m{i}"), Some(p.to_string_lossy().to_string())));
+            models.push(dummy_model(
+                &format!("m{i}"),
+                Some(p.to_string_lossy().to_string()),
+            ));
         }
         models.push(dummy_model(
             "missing",

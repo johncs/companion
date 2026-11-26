@@ -1,5 +1,6 @@
 //! Sidebar component: live FTS5 search, chat list, and header actions.
 
+mod actions;
 mod widgets;
 
 use std::collections::HashSet;
@@ -8,7 +9,7 @@ use adw::prelude::*;
 use gtk::glib;
 use relm4::prelude::*;
 
-use crate::i18n::{gettext, tr_f};
+use crate::i18n::gettext;
 use crate::storage::Database;
 use crate::ui::sidebar_rows::{build_conversation_row, new_nav_list};
 use crate::ui::widgets::clear_list_box;
@@ -26,11 +27,32 @@ pub enum SidebarMsg {
         result: Result<Vec<crate::storage::Conversation>, String>,
     },
     NewChat,
+    ChatCreated(Result<crate::storage::Conversation, String>),
     SelectConversation(String),
-    RenameConversation { id: String, title: String },
+    RenameConversation {
+        id: String,
+        title: String,
+    },
+    ChatRenamed {
+        id: String,
+        title: String,
+        result: Result<(), String>,
+    },
     DuplicateConversation(String),
+    ChatDuplicated(Result<Option<crate::storage::Conversation>, String>),
     DeleteConversation(String),
-    SetConversationRunning { id: String, is_running: bool },
+    ChatDeleted {
+        id: String,
+        result: Result<(), String>,
+    },
+    ChatsLoaded {
+        request_seq: u64,
+        result: Result<Vec<crate::storage::Conversation>, String>,
+    },
+    SetConversationRunning {
+        id: String,
+        is_running: bool,
+    },
     RefreshLists,
     OpenSettings,
 }
@@ -49,6 +71,7 @@ pub struct SidebarModel {
     search_query: String,
     search_debounce: Option<glib::SourceId>,
     search_seq: u64,
+    list_seq: u64,
     active_conversation_id: Option<String>,
     running_conversations: HashSet<String>,
     chats_list: gtk::ListBox,
@@ -161,6 +184,7 @@ impl SimpleComponent for SidebarModel {
             search_query: String::new(),
             search_debounce: None,
             search_seq: 0,
+            list_seq: 0,
             active_conversation_id: None,
             running_conversations: HashSet::new(),
             chats_list,
@@ -195,25 +219,27 @@ impl SimpleComponent for SidebarModel {
                 self.search_debounce = None;
                 self.rebuild_lists(&sender);
             }
-            SidebarMsg::SearchResultsLoaded { request_seq, result } => {
+            SidebarMsg::SearchResultsLoaded {
+                request_seq,
+                result,
+            } => {
                 if self.search_seq != request_seq || self.search_query.trim().is_empty() {
                     return;
                 }
                 clear_list_box(&self.search_list);
                 match result {
                     Ok(convs) if convs.is_empty() => {
-                        self.search_list
-                            .append(&build_sidebar_empty_row(&gettext("No matching conversations")));
+                        self.search_list.append(&build_sidebar_empty_row(&gettext(
+                            "No matching conversations",
+                        )));
                     }
                     Ok(convs) => {
                         for conv in convs {
-                            let is_active = self.active_conversation_id.as_deref() == Some(&conv.id);
+                            let is_active =
+                                self.active_conversation_id.as_deref() == Some(&conv.id);
                             let is_running = self.running_conversations.contains(&conv.id);
                             self.search_list.append(&build_conversation_row(
-                                &conv,
-                                is_active,
-                                is_running,
-                                &sender,
+                                &conv, is_active, is_running, &sender,
                             ));
                         }
                     }
@@ -227,69 +253,33 @@ impl SimpleComponent for SidebarModel {
                     }
                 }
             }
-            SidebarMsg::NewChat => {
-                let title = gettext("New Chat");
-                match self.db.create_conversation(&title) {
-                    Ok(conv) => {
-                        self.active_conversation_id = Some(conv.id.clone());
-                        self.rebuild_lists(&sender);
-                        let _ = sender.output(SidebarOutput::ConversationSelected(conv.id));
-                    }
-                    Err(err) => {
-                        let _ = sender.output(SidebarOutput::ShowToast(tr_f(
-                            "Failed to create chat: {err}",
-                            &[("err", &err.to_string())],
-                        )));
-                    }
-                }
-            }
+            SidebarMsg::NewChat => self.on_new_chat(&sender),
+            SidebarMsg::ChatCreated(res) => self.on_chat_created(res, &sender),
             SidebarMsg::SelectConversation(conv_id) => {
                 self.active_conversation_id = Some(conv_id.clone());
                 self.rebuild_lists(&sender);
                 let _ = sender.output(SidebarOutput::ConversationSelected(conv_id));
             }
             SidebarMsg::RenameConversation { id, title } => {
-                if let Err(err) = self.db.rename_conversation(&id, &title) {
-                    let _ = sender.output(SidebarOutput::ShowToast(tr_f(
-                        "Failed to rename chat: {err}",
-                        &[("err", &err.to_string())],
-                    )));
-                } else {
-                    self.rebuild_lists(&sender);
-                    let _ = sender.output(SidebarOutput::ConversationRenamed { id, title });
-                }
+                self.on_rename_conversation(id, title, &sender);
+            }
+            SidebarMsg::ChatRenamed { id, title, result } => {
+                self.on_chat_renamed(id, title, result, &sender);
             }
             SidebarMsg::DuplicateConversation(conv_id) => {
-                match self.db.duplicate_conversation(&conv_id) {
-                    Ok(Some(copy)) => {
-                        self.active_conversation_id = Some(copy.id.clone());
-                        self.rebuild_lists(&sender);
-                        let _ = sender.output(SidebarOutput::ConversationSelected(copy.id));
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        let _ = sender.output(SidebarOutput::ShowToast(tr_f(
-                            "Failed to duplicate chat: {err}",
-                            &[("err", &err.to_string())],
-                        )));
-                    }
-                }
+                self.on_duplicate_conversation(conv_id, &sender);
             }
+            SidebarMsg::ChatDuplicated(res) => self.on_chat_duplicated(res, &sender),
             SidebarMsg::DeleteConversation(conv_id) => {
-                if let Err(err) = self.db.delete_conversation(&conv_id) {
-                    let _ = sender.output(SidebarOutput::ShowToast(tr_f(
-                        "Failed to delete chat: {err}",
-                        &[("err", &err.to_string())],
-                    )));
-                } else {
-                    self.running_conversations.remove(&conv_id);
-                    if self.active_conversation_id.as_deref() == Some(&conv_id) {
-                        self.active_conversation_id = None;
-                    }
-                    self.rebuild_lists(&sender);
-                    let _ = sender.output(SidebarOutput::ConversationDeleted(conv_id));
-                }
+                self.on_delete_conversation(conv_id, &sender);
             }
+            SidebarMsg::ChatDeleted { id, result } => {
+                self.on_chat_deleted(id, result, &sender);
+            }
+            SidebarMsg::ChatsLoaded {
+                request_seq,
+                result,
+            } => self.on_chats_loaded(request_seq, result, &sender),
             SidebarMsg::SetConversationRunning { id, is_running } => {
                 let changed = if is_running {
                     self.running_conversations.insert(id)
@@ -351,28 +341,18 @@ impl SidebarModel {
         });
     }
 
-    fn populate_chats(&self, sender: &ComponentSender<Self>) {
-        match self.db.list_conversations(100) {
-            Ok(convs) => {
-                for conv in convs {
-                    let is_active = self.active_conversation_id.as_deref() == Some(&conv.id);
-                    let is_running = self.running_conversations.contains(&conv.id);
-                    self.chats_list.append(&build_conversation_row(
-                        &conv,
-                        is_active,
-                        is_running,
-                        sender,
-                    ));
-                }
-            }
-            Err(err) => {
-                tracing::error!("Failed to list chats: {err}");
-                let sender_clone = sender.clone();
-                self.chats_list.append(&build_sidebar_error_row(
-                    &gettext("Failed to load chats"),
-                    move || sender_clone.input(SidebarMsg::RefreshLists),
-                ));
-            }
-        }
+    fn populate_chats(&mut self, sender: &ComponentSender<Self>) {
+        self.list_seq = self.list_seq.wrapping_add(1);
+        let req_seq = self.list_seq;
+        let db = self.db.clone();
+        let input_sender = sender.input_sender().clone();
+
+        crate::core::runtime().spawn_blocking(move || {
+            let result = db.list_conversations(100).map_err(|e| e.to_string());
+            let _ = input_sender.send(SidebarMsg::ChatsLoaded {
+                request_seq: req_seq,
+                result,
+            });
+        });
     }
 }

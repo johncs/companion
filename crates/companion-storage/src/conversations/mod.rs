@@ -1,6 +1,6 @@
 //! Conversation persistence and FTS5 full-text search.
 
-use std::collections::HashMap;
+mod duplicate;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -10,8 +10,8 @@ use uuid::Uuid;
 use companion_core::ThinkingLevel;
 use companion_core::prompt::default_system_prompt;
 
-use super::Database;
-use super::entities::Conversation;
+use crate::Database;
+use crate::entities::Conversation;
 
 impl Database {
     /// List all conversations ordered by pinned state and recent activity.
@@ -189,10 +189,10 @@ impl Database {
                 ],
             )?;
 
-            let mut msg_id_map = duplicate_messages(tx, source_id, &copy.id)?;
-            duplicate_attachments(tx, source_id, &mut msg_id_map)?;
-            duplicate_tool_calls(tx, source_id, &msg_id_map)?;
-            duplicate_folders(tx, source_id, &copy.id)?;
+            let mut msg_id_map = duplicate::duplicate_messages(tx, source_id, &copy.id)?;
+            duplicate::duplicate_attachments(tx, source_id, &mut msg_id_map)?;
+            duplicate::duplicate_tool_calls(tx, source_id, &msg_id_map)?;
+            duplicate::duplicate_folders(tx, source_id, &copy.id)?;
 
             Ok(Some(copy))
         })
@@ -244,202 +244,6 @@ impl Database {
             }
         })
     }
-}
-
-type MsgRow = (
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    i64,
-    Option<i64>,
-    i64,
-);
-
-fn duplicate_messages(
-    tx: &rusqlite::Transaction<'_>,
-    source_id: &str,
-    copy_id: &str,
-) -> Result<HashMap<String, String>> {
-    let mut stmt = tx.prepare(
-        "SELECT id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at
-         FROM messages
-         WHERE conversation_id = ?1
-         ORDER BY created_at ASC, rowid ASC",
-    )?;
-    let rows: Vec<MsgRow> = stmt
-        .query_map(params![source_id], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                row.get(9)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    let mut id_map = HashMap::with_capacity(rows.len());
-    for (old_id, role, content, reasoning, thinking, model_name, device, tokens, gen_ms, created_at) in
-        rows
-    {
-        let new_id = Uuid::new_v4().to_string();
-        tx.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, reasoning_content, thinking_level, model_name, execution_device, token_count, generation_ms, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                new_id,
-                copy_id,
-                role,
-                content,
-                reasoning,
-                thinking,
-                model_name,
-                device,
-                tokens,
-                gen_ms,
-                created_at,
-            ],
-        )?;
-        id_map.insert(old_id, new_id);
-    }
-    Ok(id_map)
-}
-
-fn duplicate_attachments(
-    tx: &rusqlite::Transaction<'_>,
-    source_id: &str,
-    msg_id_map: &mut HashMap<String, String>,
-) -> Result<()> {
-    let mut stmt = tx.prepare(
-        "SELECT a.message_id, a.file_name, a.mime_type, a.file_path, a.extracted_text, a.byte_size
-         FROM attachments a
-         JOIN messages m ON m.id = a.message_id
-         WHERE m.conversation_id = ?1",
-    )?;
-    let rows: Vec<(String, String, String, String, Option<String>, i64)> = stmt
-        .query_map(params![source_id], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    for (old_msg_id, file_name, mime_type, file_path, extracted_text, byte_size) in rows {
-        if let Some(new_msg_id) = msg_id_map.get(&old_msg_id) {
-            tx.execute(
-                "INSERT INTO attachments (id, message_id, file_name, mime_type, file_path, extracted_text, byte_size)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    new_msg_id,
-                    file_name,
-                    mime_type,
-                    file_path,
-                    extracted_text,
-                    byte_size,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn duplicate_tool_calls(
-    tx: &rusqlite::Transaction<'_>,
-    source_id: &str,
-    msg_id_map: &HashMap<String, String>,
-) -> Result<()> {
-    let mut stmt = tx.prepare(
-        "SELECT t.message_id, t.tool_name, t.arguments_json, t.status, t.output, t.permission_decision, t.created_at
-         FROM tool_calls t
-         JOIN messages m ON m.id = t.message_id
-         WHERE m.conversation_id = ?1
-         ORDER BY t.created_at ASC",
-    )?;
-    let rows: Vec<(String, String, String, String, Option<String>, String, i64)> = stmt
-        .query_map(params![source_id], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    for (old_msg_id, tool_name, arguments_json, status, output, decision, created_at) in rows {
-        if let Some(new_msg_id) = msg_id_map.get(&old_msg_id) {
-            tx.execute(
-                "INSERT INTO tool_calls (id, message_id, tool_name, arguments_json, status, output, permission_decision, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    new_msg_id,
-                    tool_name,
-                    arguments_json,
-                    status,
-                    output,
-                    decision,
-                    created_at,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn duplicate_folders(
-    tx: &rusqlite::Transaction<'_>,
-    source_id: &str,
-    copy_id: &str,
-) -> Result<()> {
-    let mut stmt = tx.prepare(
-        "SELECT folder_path, permission_mode, created_at
-         FROM conversation_folders
-         WHERE conversation_id = ?1
-         ORDER BY created_at ASC, rowid ASC",
-    )?;
-    let folders: Vec<(String, String, i64)> = stmt
-        .query_map(params![source_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-
-    for (folder_path, permission_mode, created_at) in folders {
-        tx.execute(
-            "INSERT INTO conversation_folders (id, conversation_id, folder_path, permission_mode, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                Uuid::new_v4().to_string(),
-                copy_id,
-                folder_path,
-                permission_mode,
-                created_at,
-            ],
-        )?;
-    }
-    Ok(())
 }
 
 fn map_conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {

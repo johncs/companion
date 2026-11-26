@@ -8,22 +8,24 @@ use gtk::prelude::ObjectExt;
 use gtk::subclass::prelude::*;
 use std::sync::OnceLock;
 
+use crate::core::ThinkingLevel;
 use crate::core::markdown::{
     CodeHighlightCache, MarkdownBlock, parse_markdown_blocks, parse_markdown_blocks_cached,
     parse_markdown_blocks_streaming,
 };
+use crate::core::types::{ExecutionDevice, MessageRole};
 use crate::storage::entities::Message;
 use crate::storage::{AttachmentRecord, ToolCallRecord};
 
 #[derive(Debug, Clone)]
 pub struct MessageEntry {
     pub id: String,
-    pub role: String,
+    pub role: MessageRole,
     pub content: String,
     pub reasoning_content: Option<String>,
-    pub thinking_level: Option<String>,
+    pub thinking_level: Option<ThinkingLevel>,
     pub model_name: Option<String>,
-    pub execution_device: Option<String>,
+    pub execution_device: Option<ExecutionDevice>,
     pub token_count: i64,
     pub generation_ms: Option<i64>,
     pub created_at: i64,
@@ -88,12 +90,12 @@ impl MessageObject {
         let obj: Self = glib::Object::new();
         *obj.imp().entry.borrow_mut() = Some(MessageEntry {
             id: msg.id.clone(),
-            role: msg.role.as_str().to_string(),
+            role: msg.role,
             content: msg.content.clone(),
             reasoning_content: msg.reasoning_content.clone(),
-            thinking_level: msg.thinking_level.map(|t| t.as_str().to_string()),
+            thinking_level: msg.thinking_level,
             model_name: msg.model_name.clone(),
-            execution_device: msg.execution_device.map(|d| d.as_str().to_string()),
+            execution_device: msg.execution_device,
             token_count: msg.token_count,
             generation_ms: msg.generation_ms,
             created_at: msg.created_at,
@@ -109,15 +111,15 @@ impl MessageObject {
     /// Construct a new streaming assistant [`MessageObject`].
     pub fn new_streaming(
         id: String,
-        thinking_level: Option<String>,
+        thinking_level: Option<ThinkingLevel>,
         model_name: Option<String>,
-        execution_device: Option<String>,
+        execution_device: Option<ExecutionDevice>,
         created_at: i64,
     ) -> Self {
         let obj: Self = glib::Object::new();
         *obj.imp().entry.borrow_mut() = Some(MessageEntry {
             id,
-            role: "assistant".to_string(),
+            role: MessageRole::Assistant,
             content: String::new(),
             reasoning_content: None,
             thinking_level,
@@ -188,12 +190,7 @@ impl MessageObject {
     }
 
     /// Update streaming content/reasoning and notify any bound `gtk::ListView` row.
-    pub fn update_streaming(
-        &self,
-        content: &str,
-        reasoning: Option<&str>,
-        is_streaming: bool,
-    ) {
+    pub fn update_streaming(&self, content: &str, reasoning: Option<&str>, is_streaming: bool) {
         let should_emit = {
             let (content_unchanged, was_streaming, had_status) = {
                 let borrow = self.imp().entry.borrow();
@@ -234,6 +231,33 @@ impl MessageObject {
         }
     }
 
+    /// Apply the authoritative persisted message ID, timestamp, and final content after DB save.
+    pub fn finalize_persisted(
+        &self,
+        saved_id: Option<&str>,
+        created_at: Option<i64>,
+        final_answer: &str,
+        final_reasoning: Option<&str>,
+        total_tokens: i64,
+        elapsed_ms: i64,
+    ) {
+        self.update_streaming(final_answer, final_reasoning, false);
+        {
+            let mut borrow = self.imp().entry.borrow_mut();
+            if let Some(entry) = borrow.as_mut() {
+                if let Some(id) = saved_id {
+                    entry.id = id.to_string();
+                }
+                if let Some(ts) = created_at {
+                    entry.created_at = ts;
+                }
+                entry.token_count = total_tokens;
+                entry.generation_ms = Some(elapsed_ms);
+            }
+        }
+        self.emit_by_name::<()>("updated", &[]);
+    }
+
     /// Record completion token count and generation duration (ms) for the Message Info dialog.
     pub fn set_metrics(&self, token_count: i64, generation_ms: i64) {
         {
@@ -247,6 +271,7 @@ impl MessageObject {
     }
 
     /// Borrow the underlying [`MessageEntry`] without cloning vectors/strings.
+    #[allow(clippy::expect_used)]
     pub fn with_entry<R>(&self, f: impl FnOnce(&MessageEntry) -> R) -> R {
         let borrow = self.imp().entry.borrow();
         let entry = borrow.as_ref().expect("MessageObject initialized");
@@ -272,6 +297,7 @@ impl MessageObject {
         self.emit_by_name::<()>("updated", &[]);
     }
 
+    #[allow(clippy::expect_used)]
     pub fn entry(&self) -> MessageEntry {
         self.imp()
             .entry

@@ -1,18 +1,22 @@
 //! Conversation loading, page application, and drag-and-drop overlay helpers for [`ChatViewModel`].
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use adw::prelude::*;
-use gtk::{gdk, gio};
+use gtk::{gdk, gio, glib};
 use relm4::prelude::*;
 
 use crate::core::prompt::default_system_prompt;
 use crate::core::runtime;
+use crate::core::types::FolderPermission;
 use crate::i18n::{gettext, tr_f};
 use crate::ui::composer::ComposerMsg;
 use crate::ui::message_object::MessageObject;
+use crate::ui::permission_dialog::{FolderDropGrantChoice, present_folder_drop_confirm_dialog};
+use crate::ui::widgets::spawn_blocking_ui;
 
-use super::page_loader::{LoadedPageData, load_and_parse_page};
+use super::page_loader::{LoadedPageData, load_and_parse_page, scroll_scroller_to_bottom};
 use super::{ChatViewModel, ChatViewMsg, ChatViewOutput};
 
 impl ChatViewModel {
@@ -93,7 +97,8 @@ impl ChatViewModel {
                 if let Some(run) = self.active_runs.borrow().get(&conversation_id) {
                     self.store.append(&run.stream_obj);
                 }
-                self.composer.emit(ComposerMsg::SetContextUsed(data.est_tokens));
+                self.composer
+                    .emit(ComposerMsg::SetContextUsed(data.est_tokens));
                 self.is_empty = self.store.n_items() == 0;
                 self.scroll_to_bottom();
             }
@@ -191,6 +196,139 @@ impl ChatViewModel {
                 obj.emit_updated();
             }
         }
+    }
+
+    pub(super) fn handle_grant_folder(&self, path: PathBuf, sender: &ComponentSender<Self>) {
+        let Some(conv_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        let folder_str = path.to_string_lossy().to_string();
+        let folder_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&folder_str)
+            .to_string();
+        let db = self.db.clone();
+        let sender_clone = sender.clone();
+        let folder_str_check = folder_str.clone();
+        spawn_blocking_ui(
+            move || {
+                db.list_conversation_folders(&conv_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .any(|f| f.folder_path == folder_str_check)
+            },
+            move |already_granted| {
+                if already_granted {
+                    let _ = sender_clone.output(ChatViewOutput::ShowToast(tr_f(
+                        "Folder already granted: {folder}",
+                        &[("folder", &folder_name)],
+                    )));
+                } else {
+                    sender_clone.input(ChatViewMsg::PresentGrantFolderDialog {
+                        folder_name,
+                        folder_str,
+                    });
+                }
+            },
+        );
+    }
+
+    pub(super) fn present_grant_folder_dialog(
+        &self,
+        folder_name: String,
+        folder_str: String,
+        sender: &ComponentSender<Self>,
+    ) {
+        let Some(conv_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        let db = self.db.clone();
+        let sender_clone = sender.clone();
+        let folder_name_cb = folder_name.clone();
+        let folder_str_cb = folder_str.clone();
+        present_folder_drop_confirm_dialog(
+            &self.scrolled_window,
+            &folder_name,
+            &folder_str,
+            move |choice| {
+                let allow_write = match choice {
+                    FolderDropGrantChoice::Cancel => return,
+                    FolderDropGrantChoice::ReadOnly => false,
+                    FolderDropGrantChoice::ReadWrite => true,
+                };
+                let db = db.clone();
+                let conv_id = conv_id.clone();
+                let folder_str_cb = folder_str_cb.clone();
+                let folder_name_cb = folder_name_cb.clone();
+                let sender_done = sender_clone.clone();
+                spawn_blocking_ui(
+                    move || -> Result<(), String> {
+                        let entry = db
+                            .add_conversation_folder(&conv_id, &folder_str_cb)
+                            .map_err(|e| e.to_string())?;
+                        if allow_write {
+                            let _ = db.set_conversation_folder_permission(
+                                &entry.id,
+                                FolderPermission::ReadWrite,
+                            );
+                        }
+                        Ok(())
+                    },
+                    move |res| match res {
+                        Ok(()) => {
+                            sender_done.input(ChatViewMsg::RefreshGrantedFolders);
+                            let msg = if allow_write {
+                                tr_f(
+                                    "Granted read & write access to {folder}",
+                                    &[("folder", &folder_name_cb)],
+                                )
+                            } else {
+                                tr_f(
+                                    "Granted read-only access to {folder}",
+                                    &[("folder", &folder_name_cb)],
+                                )
+                            };
+                            let _ = sender_done.output(ChatViewOutput::ShowToast(msg));
+                        }
+                        Err(err) => {
+                            let _ = sender_done.output(ChatViewOutput::ShowToast(tr_f(
+                                "Failed to grant folder: {err}",
+                                &[("err", &err)],
+                            )));
+                        }
+                    },
+                );
+            },
+        );
+    }
+
+    pub(super) fn empty_description(&self) -> String {
+        let name = self.assistant_name.borrow();
+        tr_f(
+            "Ask {name} anything, or share a file or image below.",
+            &[("name", &name)],
+        )
+    }
+
+    pub(super) fn scroll_to_bottom(&self) {
+        let count = self.store.n_items();
+        if count == 0 {
+            return;
+        }
+        let last_idx = count - 1;
+        let scroller = self.scrolled_window.clone();
+        let list = self.message_list.clone();
+        glib::idle_add_local_once(move || {
+            list.scroll_to(last_idx, gtk::ListScrollFlags::NONE, None);
+            scroll_scroller_to_bottom(&scroller);
+            let scroller2 = scroller.clone();
+            let list2 = list.clone();
+            glib::timeout_add_local_once(Duration::from_millis(60), move || {
+                list2.scroll_to(last_idx, gtk::ListScrollFlags::NONE, None);
+                scroll_scroller_to_bottom(&scroller2);
+            });
+        });
     }
 }
 

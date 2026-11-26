@@ -65,12 +65,14 @@ mod tests {
         assert_eq!(partial.n_gpu_layers, 99);
         assert_eq!(partial.thinking_level, ThinkingLevel::Medium);
 
-        assert_eq!(ModelParams::from_json_lossy("not-json"), ModelParams::default());
+        assert_eq!(
+            ModelParams::from_json_lossy("not-json"),
+            ModelParams::default()
+        );
         assert_eq!(ModelParams::from_json_lossy("{}"), ModelParams::default());
         assert_eq!(ModelParams::from_json_lossy("   "), ModelParams::default());
 
-        let with_unknown =
-            ModelParams::from_json_lossy(r#"{"n_ctx": 2048, "future_flag": true}"#);
+        let with_unknown = ModelParams::from_json_lossy(r#"{"n_ctx": 2048, "future_flag": true}"#);
         assert_eq!(with_unknown.n_ctx, 2048);
         assert_eq!(with_unknown.temperature, ModelParams::default().temperature);
     }

@@ -59,14 +59,15 @@ pub(super) fn build_open_folder_button(
 }
 
 fn open_path_in_file_manager(dialog: &adw::PreferencesDialog, path: &PathBuf, is_file: bool) {
-    if !is_file && !path.exists() {
-        if let Err(err) = std::fs::create_dir_all(path) {
-            dialog.add_toast(adw::Toast::new(&tr_f(
-                "Failed to open folder: {err}",
-                &[("err", &err.to_string())],
-            )));
-            return;
-        }
+    if !is_file
+        && !path.exists()
+        && let Err(err) = std::fs::create_dir_all(path)
+    {
+        dialog.add_toast(adw::Toast::new(&tr_f(
+            "Failed to open folder: {err}",
+            &[("err", &err.to_string())],
+        )));
+        return;
     }
 
     let file = gio::File::for_path(path);

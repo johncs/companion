@@ -63,7 +63,9 @@ impl Database {
                  )",
             )?;
             let mut map: HashMap<String, String> = HashMap::new();
-            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
             for row in rows {
                 let (k, v) = row?;
                 map.insert(k, v);
@@ -251,7 +253,8 @@ mod tests {
         db.set_search_engine(SearchEngine::SearXNG).unwrap();
         assert_eq!(db.get_search_engine().unwrap(), SearchEngine::SearXNG);
 
-        db.set_searxng_url("  https://search.example.org/// ").unwrap();
+        db.set_searxng_url("  https://search.example.org/// ")
+            .unwrap();
         assert_eq!(
             db.get_searxng_url().unwrap().as_deref(),
             Some("https://search.example.org")

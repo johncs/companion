@@ -172,4 +172,21 @@ mod tests {
         );
         assert_eq!(filter.finish(), "");
     }
+
+    #[test]
+    fn overlapping_partial_suffix_emits_prefix_and_keeps_latest_suffix() {
+        let mut filter = StopSequenceFilter::with_sequences(vec!["<|end|>"]);
+        let mut out = String::new();
+        for chunk in ["hi<|en", "<|end|>tail"] {
+            match filter.push(chunk) {
+                StopOutput::Emit(s) => out.push_str(&s),
+                StopOutput::Stopped { emit } => {
+                    out.push_str(&emit);
+                    assert_eq!(out, "hi<|en");
+                    return;
+                }
+            }
+        }
+        panic!("expected stop sequence");
+    }
 }

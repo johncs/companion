@@ -46,8 +46,13 @@ fn plan_block_update(
         if is_streaming
             && new_blocks.len() == prev.len()
             && let (
-                Some(MarkdownBlock::Code { language: prev_lang, .. }),
-                Some(MarkdownBlock::Code { language: new_lang, .. }),
+                Some(MarkdownBlock::Code {
+                    language: prev_lang,
+                    ..
+                }),
+                Some(MarkdownBlock::Code {
+                    language: new_lang, ..
+                }),
             ) = (prev.last(), new_blocks.last())
             && prev_lang == new_lang
         {
@@ -69,11 +74,17 @@ pub(super) fn update_blocks_box(
 ) {
     let plan = {
         let prev = rendered_cache.borrow();
-        plan_block_update(&prev, rendered_is_dark.get(), new_blocks, is_dark, is_streaming)
+        plan_block_update(
+            &prev,
+            rendered_is_dark.get(),
+            new_blocks,
+            is_dark,
+            is_streaming,
+        )
     };
 
     match plan {
-        BlockUpdatePlan::Skip => return,
+        BlockUpdatePlan::Skip => (),
         BlockUpdatePlan::UpdateLastText => {
             if let (Some(MarkdownBlock::Text(new_markup)), Some(last_widget)) =
                 (new_blocks.last(), blocks_box.last_child())
@@ -236,7 +247,13 @@ fn build_markdown_table(headers: &[String], rows: &[Vec<String>]) -> gtk::Scroll
                 .css_classes(["markdown-table-cell"])
                 .build();
             wrapper.append(&cell);
-            grid.attach(&wrapper, col_idx as i32, (row_idx + row_offset) as i32, 1, 1);
+            grid.attach(
+                &wrapper,
+                col_idx as i32,
+                (row_idx + row_offset) as i32,
+                1,
+                1,
+            );
         }
     }
 
@@ -263,7 +280,7 @@ fn build_code_block(language: Option<&str>, raw_code: &str, pango_markup: &str) 
         .build();
 
     let lang_label = gtk::Label::builder()
-        .label(&format_code_language(language))
+        .label(format_code_language(language))
         .xalign(0.0)
         .hexpand(true)
         .css_classes(["caption-heading", "dim-label"])
@@ -323,7 +340,10 @@ mod tests {
 
     #[test]
     fn skips_when_blocks_and_theme_match() {
-        let blocks = vec![MarkdownBlock::Text("hi".into()), code_block("rust", "fn main() {}")];
+        let blocks = vec![
+            MarkdownBlock::Text("hi".into()),
+            code_block("rust", "fn main() {}"),
+        ];
         assert_eq!(
             plan_block_update(&blocks, true, &blocks, true, false),
             BlockUpdatePlan::Skip
@@ -332,7 +352,10 @@ mod tests {
 
     #[test]
     fn rebuilds_all_when_theme_flips_even_with_identical_blocks() {
-        let blocks = vec![MarkdownBlock::Text("hi".into()), code_block("rust", "fn main() {}")];
+        let blocks = vec![
+            MarkdownBlock::Text("hi".into()),
+            code_block("rust", "fn main() {}"),
+        ];
         assert_eq!(
             plan_block_update(&blocks, true, &blocks, false, false),
             BlockUpdatePlan::RebuildAll

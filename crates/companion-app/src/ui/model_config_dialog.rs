@@ -1,6 +1,5 @@
 //! Per-model inference configuration dialog and pure form-state logic.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -71,7 +70,11 @@ impl ModelConfigFormState {
         existing_max_tokens: u32,
     ) -> ModelParams {
         ModelParams {
-            n_ctx: self.ctx_presets.get(ctx_idx as usize).copied().unwrap_or(4096),
+            n_ctx: self
+                .ctx_presets
+                .get(ctx_idx as usize)
+                .copied()
+                .unwrap_or(4096),
             n_gpu_layers: if gpu { 99 } else { 0 },
             max_tokens: existing_max_tokens,
             temperature: ((temp_value * 100.0).round() / 100.0) as f32,
@@ -86,7 +89,7 @@ pub fn present_model_config_dialog(
     db: Database,
     model: ModelRecord,
     parent_dialog: adw::PreferencesDialog,
-    refresh_weak: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    on_saved: Rc<dyn Fn()>,
 ) {
     let dialog = adw::Dialog::builder()
         .title(gettext("Configure AI Model"))
@@ -117,7 +120,7 @@ pub fn present_model_config_dialog(
     let info_group = build_info_group(&model);
     let (group, ctx_row, thinking_row, gpu_row, temp_row) = build_controls_group(&form, max_ctx);
     let reset_btn = gtk::Button::builder()
-        .label(&gettext("Reset to Default"))
+        .label(gettext("Reset to Default"))
         .halign(gtk::Align::Start)
         .build();
 
@@ -152,12 +155,6 @@ pub fn present_model_config_dialog(
     let d_save = dialog.clone();
     save_btn.connect_clicked(move |_| {
         let mut updated = model.clone();
-        updated.supports_thinking = model
-            .file_path
-            .as_deref()
-            .map(std::path::Path::new)
-            .is_some_and(crate::models::detect_gguf_supports_thinking)
-            || model.supports_thinking;
         updated.default_params = form.to_model_params(
             ctx_row.selected(),
             thinking_row.selected(),
@@ -165,17 +162,32 @@ pub fn present_model_config_dialog(
             temp_row.value(),
             model.default_params.max_tokens,
         );
-        if let Err(err) = db.upsert_model(&updated) {
-            parent_dialog.add_toast(adw::Toast::new(&tr_f(
-                "Failed to save: {err}",
-                &[("err", &err.to_string())],
-            )));
-        } else {
-            parent_dialog.add_toast(adw::Toast::new(&gettext("Saved model settings")));
-            if let Some(f) = refresh_weak.borrow().as_ref() {
-                f();
-            }
-        }
+        let db = db.clone();
+        let parent_dialog = parent_dialog.clone();
+        let on_saved = on_saved.clone();
+        crate::ui::widgets::spawn_blocking_ui(
+            move || -> Result<(), String> {
+                updated.supports_thinking = updated
+                    .file_path
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .is_some_and(crate::models::detect_gguf_supports_thinking)
+                    || updated.supports_thinking;
+                db.upsert_model(&updated).map_err(|e| e.to_string())
+            },
+            move |res| match res {
+                Ok(()) => {
+                    parent_dialog.add_toast(adw::Toast::new(&gettext("Saved model settings")));
+                    on_saved();
+                }
+                Err(err) => {
+                    parent_dialog.add_toast(adw::Toast::new(&tr_f(
+                        "Failed to save: {err}",
+                        &[("err", &err)],
+                    )));
+                }
+            },
+        );
         d_save.close();
     });
 

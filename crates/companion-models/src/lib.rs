@@ -1,6 +1,6 @@
 //! Local model discovery, hardware capability probing, and Hugging Face GGUF downloads.
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod download_manager;
 pub mod gguf;
@@ -112,8 +112,16 @@ pub fn friendly_model_name(raw: &str) -> String {
         if lower.is_empty()
             || matches!(
                 lower.as_str(),
-                "it" | "instruct" | "chat" | "gguf" | "meta" | "qat" | "ud" | "fp16" | "bf16"
-                    | "f16" | "f32"
+                "it" | "instruct"
+                    | "chat"
+                    | "gguf"
+                    | "meta"
+                    | "qat"
+                    | "ud"
+                    | "fp16"
+                    | "bf16"
+                    | "f16"
+                    | "f32"
             )
         {
             continue;
@@ -131,7 +139,9 @@ pub fn friendly_model_name(raw: &str) -> String {
                 lower.to_ascii_uppercase()
             }
             _ if lower.ends_with('b')
-                && lower[..lower.len() - 1].chars().all(|c| c.is_ascii_digit() || c == '.') =>
+                && lower[..lower.len() - 1]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.') =>
             {
                 lower.to_ascii_uppercase()
             }
@@ -231,77 +241,79 @@ pub fn discover_managed_models_in(models_dir: &Path) -> Vec<DiscoveredModel> {
 
     dirs.sort();
     for dir in dirs {
-        let dir_name = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let hf_repo = dir_name
-            .contains("--")
-            .then(|| dir_name.replacen("--", "/", 1));
-
-        let Ok(sub_entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut gguf_files: Vec<PathBuf> = sub_entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| is_gguf_file(p))
-            .collect();
-        gguf_files.sort();
-
-        let mut mmproj_candidates = Vec::new();
-        let mut model_files = Vec::new();
-        for p in gguf_files {
-            if is_mmproj_or_clip(&p) {
-                mmproj_candidates.push(p);
-            } else if p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| !is_auxiliary_gguf_name(n))
-            {
-                model_files.push(p);
-            }
-        }
-
-        let best_mmproj = mmproj_candidates.into_iter().min_by_key(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX);
-            (mmproj_precision_rank(name), size)
-        });
-
-        for path in model_files {
-            let filename = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("model.gguf");
-            discovered.push(DiscoveredModel {
-                display_name: friendly_model_name(filename),
-                supports_thinking: detect_gguf_supports_thinking(&path),
-                quantization: infer_quantization(filename),
-                file_path: path,
-                mmproj_path: best_mmproj.clone(),
-                hf_repo: hf_repo.clone(),
-            });
-        }
+        scan_repo_directory(&dir, &mut discovered);
     }
 
     top_level_ggufs.sort();
     for path in top_level_ggufs {
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("model.gguf");
-        discovered.push(DiscoveredModel {
-            display_name: friendly_model_name(filename),
-            supports_thinking: detect_gguf_supports_thinking(&path),
-            quantization: infer_quantization(filename),
-            file_path: path,
-            mmproj_path: None,
-            hf_repo: None,
-        });
+        discovered.push(build_discovered_model(path, None, None));
     }
 
     discovered
+}
+
+fn scan_repo_directory(dir: &Path, discovered: &mut Vec<DiscoveredModel>) {
+    let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let hf_repo = dir_name
+        .contains("--")
+        .then(|| dir_name.replacen("--", "/", 1));
+
+    let Ok(sub_entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut gguf_files: Vec<PathBuf> = sub_entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| is_gguf_file(p))
+        .collect();
+    gguf_files.sort();
+
+    let mut mmproj_candidates = Vec::new();
+    let mut model_files = Vec::new();
+    for p in gguf_files {
+        if is_mmproj_or_clip(&p) {
+            mmproj_candidates.push(p);
+        } else if p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| !is_auxiliary_gguf_name(n))
+        {
+            model_files.push(p);
+        }
+    }
+
+    let best_mmproj = mmproj_candidates.into_iter().min_by_key(|p| {
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX);
+        (mmproj_precision_rank(name), size)
+    });
+
+    for path in model_files {
+        discovered.push(build_discovered_model(
+            path,
+            best_mmproj.clone(),
+            hf_repo.clone(),
+        ));
+    }
+}
+
+fn build_discovered_model(
+    path: PathBuf,
+    mmproj_path: Option<PathBuf>,
+    hf_repo: Option<String>,
+) -> DiscoveredModel {
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("model.gguf");
+    DiscoveredModel {
+        display_name: friendly_model_name(filename),
+        supports_thinking: detect_gguf_supports_thinking(&path),
+        quantization: infer_quantization(filename),
+        file_path: path,
+        mmproj_path,
+        hf_repo,
+    }
 }
 
 #[cfg(test)]

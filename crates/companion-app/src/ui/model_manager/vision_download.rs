@@ -1,6 +1,5 @@
 //! Resumable `mmproj` vision projector download powered by [`DownloadManager`].
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -8,20 +7,18 @@ use gtk::glib;
 
 use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
-use crate::models::download_manager::{DownloadKey, DownloadManager, DownloadRequest};
+use crate::models::download_manager::{DownloadManager, DownloadRequest, DownloadStatus};
 use crate::models::friendly_model_name;
 use crate::models::huggingface::{HfGgufFile, list_repo_gguf_files, select_best_mmproj};
 use crate::storage::ModelRecord;
-use crate::ui::hf_browser::DownloadControls;
-use crate::ui::widgets::{present_destructive_confirm, send_desktop_notification};
+use crate::ui::hf_browser::{DownloadControls, subscribe_download_lifecycle};
+use crate::ui::widgets::send_desktop_notification;
 
 /// Inline UI state for a model's Vision projector download row.
 #[derive(Clone)]
 pub(super) struct VisionRowUi {
     pub(super) btn: gtk::Button,
     pub(super) controls: DownloadControls,
-    pub(super) on_pause: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-    pub(super) on_cancel: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 }
 
 pub(super) fn start_mmproj_download(
@@ -122,7 +119,7 @@ fn begin_managed_mmproj(req: MmprojInstallReq) {
         mmproj_file,
         refresh_installed,
     } = req;
-    let mut handle = download_manager.start_download(DownloadRequest {
+    let handle = download_manager.start_download(DownloadRequest {
         repo_id,
         filename: mmproj_file.filename,
         mmproj_filename: None,
@@ -130,73 +127,29 @@ fn begin_managed_mmproj(req: MmprojInstallReq) {
         attach_to_model_id: Some(model.id.clone()),
     });
 
-    wire_vision_pause_cancel(&ui, &dialog, &download_manager, &handle.key, &model_name);
+    ui.controls
+        .bind_download(&download_manager, handle.key, model_name.clone(), &dialog);
 
     let dialog = dialog.clone();
     let refresh = refresh_installed.clone();
     let model_id = model.id;
-    glib::MainContext::default().spawn_local(async move {
-        while let Ok(snap) = handle.rx.recv().await {
-            ui.controls.set_progress(snap.done, snap.total);
-            ui.controls.set_paused(snap.is_paused);
-            if snap.finished {
-                *ui.on_pause.borrow_mut() = None;
-                *ui.on_cancel.borrow_mut() = None;
-                ui.controls.container.set_visible(false);
-                ui.btn.set_visible(true);
-                ui.btn.set_sensitive(true);
-                if !snap.cancelled {
-                    notify_vision_result(&dialog, &refresh, &model_id, &model_name, snap.error);
-                }
-                break;
+    let controls_done = ui.controls.clone();
+    let btn_done = ui.btn.clone();
+    subscribe_download_lifecycle(None, handle.rx, ui.controls, None, move |status| {
+        controls_done.unbind();
+        controls_done.container.set_visible(false);
+        btn_done.set_visible(true);
+        btn_done.set_sensitive(true);
+        match status {
+            DownloadStatus::Completed => {
+                notify_vision_result(&dialog, &refresh, &model_id, &model_name, None);
             }
+            DownloadStatus::Failed(err) => {
+                notify_vision_result(&dialog, &refresh, &model_id, &model_name, Some(err));
+            }
+            _ => {}
         }
     });
-}
-
-fn wire_vision_pause_cancel(
-    ui: &VisionRowUi,
-    dialog: &adw::PreferencesDialog,
-    download_manager: &DownloadManager,
-    key: &DownloadKey,
-    model_name: &str,
-) {
-    let mgr_p = download_manager.clone();
-    let key_p = key.clone();
-    *ui.on_pause.borrow_mut() = Some(Rc::new(move || {
-        let is_paused = mgr_p
-            .active_downloads()
-            .into_iter()
-            .find(|s| s.key == key_p)
-            .is_some_and(|s| s.snapshot.is_paused);
-        if is_paused {
-            mgr_p.resume(&key_p);
-        } else {
-            mgr_p.pause(&key_p);
-        }
-    }));
-
-    let mgr_c = download_manager.clone();
-    let key_c = key.clone();
-    let dialog_c = dialog.clone();
-    let name_c = model_name.to_string();
-    *ui.on_cancel.borrow_mut() = Some(Rc::new(move || {
-        let mgr_inner = mgr_c.clone();
-        let key_inner = key_c.clone();
-        let body = tr_f(
-            "Cancel downloading the Vision projector for \"{name}\"?",
-            &[("name", &name_c)],
-        );
-        present_destructive_confirm(
-            &dialog_c,
-            &gettext("Cancel Vision Download?"),
-            &body,
-            &gettext("Cancel Download"),
-            move || {
-                let _ = mgr_inner.cancel(&key_inner);
-            },
-        );
-    }));
 }
 
 fn notify_vision_result(
@@ -216,7 +169,10 @@ fn notify_vision_result(
             send_desktop_notification(
                 &format!("vision-{model_id}"),
                 &gettext("Vision Enabled"),
-                &tr_f("Vision projector for {name} is ready.", &[("name", model_name)]),
+                &tr_f(
+                    "Vision projector for {name} is ready.",
+                    &[("name", model_name)],
+                ),
             );
         }
         Some(err) => {

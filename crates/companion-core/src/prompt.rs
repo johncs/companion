@@ -20,7 +20,11 @@ pub fn render_system_prompt(
         .replace("{assistant_name}", assistant_name)
         .replace("{user_name}", user_name.unwrap_or("the user"));
     if assistant_name != "Companion" && out.starts_with("You are Companion,") {
-        out = out.replacen("You are Companion,", &format!("You are {assistant_name},"), 1);
+        out = out.replacen(
+            "You are Companion,",
+            &format!("You are {assistant_name},"),
+            1,
+        );
     }
     out
 }

@@ -9,16 +9,18 @@ use crate::storage::{
 
 pub(super) const PAGE_SIZE: usize = 20;
 
+pub(super) type LoadedMessageItem = (
+    crate::storage::entities::Message,
+    Vec<AttachmentRecord>,
+    Vec<ToolCallRecord>,
+    Vec<crate::core::markdown::MarkdownBlock>,
+);
+
 #[derive(Debug)]
 pub struct LoadedPageData {
     pub(super) conversation: Option<Conversation>,
     pub(super) granted_folders: Option<Vec<ConversationFolder>>,
-    pub(super) items: Vec<(
-        crate::storage::entities::Message,
-        Vec<AttachmentRecord>,
-        Vec<ToolCallRecord>,
-        Vec<crate::core::markdown::MarkdownBlock>,
-    )>,
+    pub(super) items: Vec<LoadedMessageItem>,
     pub(super) has_more_pages: bool,
     pub(super) oldest_loaded_ts: Option<i64>,
     pub(super) est_tokens: u32,
@@ -66,8 +68,12 @@ pub(super) fn load_and_parse_page(
     let oldest_loaded_ts = messages.first().map(|m| m.created_at);
 
     let msg_ids: Vec<&str> = messages.iter().map(|m| m.id.as_str()).collect();
-    let mut att_map = db.list_attachments_for_messages(&msg_ids).unwrap_or_default();
-    let mut tc_map = db.list_tool_calls_for_messages(&msg_ids).unwrap_or_default();
+    let mut att_map = db
+        .list_attachments_for_messages(&msg_ids)
+        .unwrap_or_default();
+    let mut tc_map = db
+        .list_tool_calls_for_messages(&msg_ids)
+        .unwrap_or_default();
 
     let mut approx_chars = effective_sys_len;
     for m in &messages {

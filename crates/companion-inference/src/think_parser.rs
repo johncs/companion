@@ -165,7 +165,13 @@ mod tests {
         let mut reasoning = String::new();
         let mut answer = String::new();
 
-        for tok in ["<|chan", "nel>thought\n", "check facts", "<chan", "nel|>Final answer."] {
+        for tok in [
+            "<|chan",
+            "nel>thought\n",
+            "check facts",
+            "<chan",
+            "nel|>Final answer.",
+        ] {
             for chunk in p.push(tok) {
                 match chunk {
                     ParsedChunk::Reasoning(r) => reasoning.push_str(&r),
@@ -182,5 +188,30 @@ mod tests {
 
         assert_eq!(reasoning, "check facts");
         assert_eq!(answer, "Final answer.");
+    }
+
+    #[test]
+    fn handles_unclosed_tags_and_multibyte_utf8() {
+        let mut p = ThinkStreamParser::new();
+        let mut reasoning = String::new();
+        let mut answer = String::new();
+
+        for tok in ["🦀<think>σκέψη ", "σε εξέλιξη"] {
+            for chunk in p.push(tok) {
+                match chunk {
+                    ParsedChunk::Reasoning(r) => reasoning.push_str(&r),
+                    ParsedChunk::Answer(a) => answer.push_str(&a),
+                }
+            }
+        }
+        for chunk in p.finish() {
+            match chunk {
+                ParsedChunk::Reasoning(r) => reasoning.push_str(&r),
+                ParsedChunk::Answer(a) => answer.push_str(&a),
+            }
+        }
+
+        assert_eq!(answer, "🦀");
+        assert_eq!(reasoning, "σκέψη σε εξέλιξη");
     }
 }

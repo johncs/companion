@@ -1,7 +1,11 @@
 //! Cached Markdown-to-Pango parser with syntect syntax highlighting for code blocks.
 
 mod highlight;
+mod inline;
 mod parser;
+mod table;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 
@@ -70,18 +74,4 @@ pub fn parse_markdown_blocks_streaming(
     cache: &mut CodeHighlightCache,
 ) -> Vec<MarkdownBlock> {
     parser::parse_markdown_blocks_impl(input, cache, true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escapes_pango_markup_special_chars_and_unicode() {
-        assert_eq!(escape_pango_markup(""), "");
-        assert_eq!(
-            escape_pango_markup(r#"a & b <tag> "q" 's' 🚀"#),
-            "a &amp; b &lt;tag&gt; &quot;q&quot; &apos;s&apos; 🚀"
-        );
-    }
 }

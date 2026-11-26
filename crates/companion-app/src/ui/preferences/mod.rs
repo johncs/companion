@@ -5,14 +5,14 @@ mod storage_stats;
 mod tools_group;
 mod web_search_group;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
 
 use crate::i18n::gettext;
 use crate::models::download_manager::DownloadManager;
-use crate::models::hardware::probe_hardware;
+use crate::models::hardware::HardwareInfo;
 use crate::storage::Database;
 use crate::ui::model_manager::build_models_page;
 
@@ -23,30 +23,61 @@ use storage_stats::{
 use tools_group::build_available_tools_group;
 use web_search_group::build_web_search_group;
 
-/// Present the unified Settings [`adw::PreferencesDialog`], optionally opening directly to `initial_page`
-/// (`"general"`, `"personalization"`, `"models"`, or `"agent"`).
+/// Initial page to display when opening the unified Settings dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    General,
+    Models,
+}
+
+impl SettingsPage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Models => "models",
+        }
+    }
+}
+
+/// Configuration and callbacks for presenting the unified Settings dialog.
+pub struct SettingsDialogConfig<F, P, W> {
+    pub db: Database,
+    pub models_dir: PathBuf,
+    pub download_manager: DownloadManager,
+    pub hardware_info: HardwareInfo,
+    pub active_model_id: Option<String>,
+    pub initial_page: SettingsPage,
+    pub on_active_changed: F,
+    pub on_personalization_changed: P,
+    pub on_web_search_global_changed: W,
+}
+
+/// Present the unified Settings [`adw::PreferencesDialog`], optionally opening directly to `initial_page`.
 pub fn present_settings_dialog<F, P, W>(
     parent: &impl IsA<gtk::Widget>,
-    db: Database,
-    models_dir: PathBuf,
-    download_manager: DownloadManager,
-    active_model_id: Option<String>,
-    initial_page: &str,
-    on_active_changed: F,
-    on_personalization_changed: P,
-    on_web_search_global_changed: W,
+    cfg: SettingsDialogConfig<F, P, W>,
 ) where
     F: Fn(Option<String>) + 'static,
     P: Fn(String, Option<String>) + 'static,
     W: Fn(bool) + 'static,
 {
+    let SettingsDialogConfig {
+        db,
+        models_dir,
+        download_manager,
+        hardware_info: hw,
+        active_model_id,
+        initial_page,
+        on_active_changed,
+        on_personalization_changed,
+        on_web_search_global_changed,
+    } = cfg;
     let dialog = adw::PreferencesDialog::builder()
         .title(gettext("Settings"))
         .content_width(820)
         .content_height(660)
         .build();
 
-    let hw = probe_hardware();
     let general_page = build_general_page(&dialog, &db, &models_dir, &hw);
 
     let (identity_group, behavior_group, about_group) =
@@ -77,14 +108,14 @@ pub fn present_settings_dialog<F, P, W>(
     dialog.add(&models_page);
     dialog.add(&agent_page);
 
-    dialog.set_visible_page_name(initial_page);
+    dialog.set_visible_page_name(initial_page.as_str());
     dialog.present(Some(parent));
 }
 
 fn build_general_page(
     dialog: &adw::PreferencesDialog,
     db: &Database,
-    models_dir: &PathBuf,
+    models_dir: &Path,
     hw: &crate::models::hardware::HardwareInfo,
 ) -> adw::PreferencesPage {
     let general_page = adw::PreferencesPage::builder()
@@ -95,12 +126,16 @@ fn build_general_page(
 
     let appearance_group = adw::PreferencesGroup::builder()
         .title(gettext("Appearance"))
-        .description(gettext("Companion follows your GNOME desktop theme and accent color."))
+        .description(gettext(
+            "Companion follows your GNOME desktop theme and accent color.",
+        ))
         .build();
 
     let style_row = adw::ComboRow::builder()
         .title(gettext("Color Scheme"))
-        .subtitle(gettext("System default follows GNOME dark/light preference"))
+        .subtitle(gettext(
+            "System default follows GNOME dark/light preference",
+        ))
         .model(&gtk::StringList::new(&[
             &gettext("System"),
             &gettext("Light"),
@@ -133,7 +168,7 @@ fn build_general_page(
 fn build_storage_group(
     dialog: &adw::PreferencesDialog,
     db: &Database,
-    models_dir: &PathBuf,
+    models_dir: &Path,
 ) -> adw::PreferencesGroup {
     let storage_group = adw::PreferencesGroup::builder()
         .title(gettext("Storage &amp; Data"))
@@ -143,18 +178,22 @@ fn build_storage_group(
     let db_size_label = build_size_label();
     let db_row = adw::ActionRow::builder()
         .title(gettext("SQLite Database"))
-        .subtitle(db_path.to_string_lossy().as_ref())
+        .subtitle(crate::core::markdown::escape_pango_markup(
+            db_path.to_string_lossy().as_ref(),
+        ))
         .build();
     db_row.add_css_class("property");
     db_row.add_suffix(&db_size_label);
     db_row.add_suffix(&build_open_folder_button(dialog, db_path.clone(), true));
     storage_group.add(&db_row);
 
-    let models_dir = models_dir.clone();
+    let models_dir = models_dir.to_path_buf();
     let models_size_label = build_size_label();
     let models_dir_row = adw::ActionRow::builder()
         .title(gettext("Downloaded AI Model Folder"))
-        .subtitle(models_dir.to_string_lossy().as_ref())
+        .subtitle(crate::core::markdown::escape_pango_markup(
+            models_dir.to_string_lossy().as_ref(),
+        ))
         .build();
     models_dir_row.add_css_class("property");
     models_dir_row.add_suffix(&models_size_label);
@@ -200,7 +239,9 @@ where
 
     let agent_group = adw::PreferencesGroup::builder()
         .title(gettext("External MCP Servers"))
-        .description(gettext("External MCP server connections will be configured here."))
+        .description(gettext(
+            "External MCP server connections will be configured here.",
+        ))
         .build();
     agent_page.add(&agent_group);
     agent_page

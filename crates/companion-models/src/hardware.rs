@@ -71,10 +71,7 @@ fn read_meminfo() -> Option<(u64, u64)> {
         }
     }
 
-    Some((
-        total_kb.unwrap_or(0) * 1024,
-        avail_kb.unwrap_or(0) * 1024,
-    ))
+    Some((total_kb.unwrap_or(0) * 1024, avail_kb.unwrap_or(0) * 1024))
 }
 
 fn parse_kb(value: &str) -> Option<u64> {

@@ -56,7 +56,6 @@ impl Database {
     }
 
     /// Fetch the most recent `limit` messages (optionally before `before_created_at`) in chronological order.
-    #[allow(dead_code)]
     pub fn list_messages_page(
         &self,
         conversation_id: &str,

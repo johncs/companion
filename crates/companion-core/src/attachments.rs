@@ -77,8 +77,8 @@ pub fn process_attachment_file(path: &Path) -> Result<AttachmentRecord> {
             Some(truncate_chars(trimmed, MAX_EXTRACTED_CHARS))
         }
         AttachmentKind::Text => {
-            let bytes = fs::read(path)
-                .with_context(|| format!("Failed to read file '{file_name}'"))?;
+            let bytes =
+                fs::read(path).with_context(|| format!("Failed to read file '{file_name}'"))?;
             if bytes.iter().take(4096).any(|&b| b == 0) {
                 bail!("'{file_name}' appears to be a binary file and cannot be attached as text");
             }

@@ -46,7 +46,10 @@ fn parse_json_tool_object(obj: &serde_json::Map<String, Value>) -> Option<Parsed
         .unwrap_or_else(|| {
             let mut flat = serde_json::Map::new();
             for (k, v) in obj {
-                if !matches!(k.as_str(), "name" | "tool" | "arguments" | "args" | "parameters") {
+                if !matches!(
+                    k.as_str(),
+                    "name" | "tool" | "arguments" | "args" | "parameters"
+                ) {
                     flat.insert(k.clone(), v.clone());
                 }
             }
@@ -179,10 +182,20 @@ mod tests {
         assert_eq!(calls2.len(), 1);
         assert_eq!(calls2[0].arguments["path"], "/tmp/a.txt");
 
-        let unclosed = "<tool_call>{\"name\": \"delete_file\", \"arguments\": {\"path\": \"COMMENT.md\"}}";
+        let unclosed =
+            "<tool_call>{\"name\": \"delete_file\", \"arguments\": {\"path\": \"COMMENT.md\"}}";
         let calls3 = parse_tool_calls(unclosed);
         assert_eq!(calls3.len(), 1);
         assert_eq!(calls3[0].name, "delete_file");
         assert_eq!(calls3[0].arguments["path"], "COMMENT.md");
+    }
+
+    #[test]
+    fn ignores_malformed_and_nested_tool_call_blocks() {
+        let text = "Before <tool_call>{not json</tool_call> middle <tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.txt\"}}</tool_call> after";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(strip_tool_calls(text), "Before  middle  after");
     }
 }

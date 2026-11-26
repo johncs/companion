@@ -2,8 +2,126 @@ use std::fs;
 
 use serde_json::json;
 
-use super::path_guard::requested_ungranted_path;
+use super::fs_ops::{
+    create_granted_directory, delete_granted_directory, delete_granted_file, list_granted_files,
+    move_granted_path, read_granted_file, search_granted_files, write_granted_file,
+};
+use super::path_guard::resolve_granted_path;
 use super::*;
+use crate::approval::ApprovalResponse;
+use crate::permissions::PermissionEngine;
+use crate::registry::ToolRegistry;
+use crate::tool::{ApprovalRequest, ToolAuthorization, ToolContext, ToolPrepareContext};
+use companion_core::types::{PermissionDecision, SearchEngine};
+
+fn is_write_already_granted(
+    granted_folders: &[GrantedFolder],
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> bool {
+    let reg = ToolRegistry::with_builtins();
+    let Some(tool) = reg.get(tool_name) else {
+        return false;
+    };
+    let perms = PermissionEngine::new();
+    let ctx = ToolPrepareContext {
+        conv_id: "test-conv",
+        granted_folders,
+        permissions: &perms,
+        web_search_enabled: false,
+        search_engine: SearchEngine::default(),
+        searxng_url: None,
+        local_texts: &[],
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    matches!(
+        rt.block_on(tool.prepare(&ctx, args)),
+        ToolAuthorization::AutoAllowed
+    )
+}
+
+fn describe_tool_action(
+    granted_folders: &[GrantedFolder],
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> String {
+    let reg = ToolRegistry::with_builtins();
+    let tool = reg.get(tool_name).unwrap();
+    let perms = PermissionEngine::new();
+    let ctx = ToolPrepareContext {
+        conv_id: "test-conv",
+        granted_folders,
+        permissions: &perms,
+        web_search_enabled: false,
+        search_engine: SearchEngine::default(),
+        searxng_url: None,
+        local_texts: &[],
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    match rt.block_on(tool.prepare(&ctx, args)) {
+        ToolAuthorization::RequiresApproval {
+            request: ApprovalRequest::ToolAction { preview, .. },
+            ..
+        } => preview,
+        other => format!("{other:?}"),
+    }
+}
+
+fn execute_tool_with_grants(
+    granted_folders: &[GrantedFolder],
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let reg = ToolRegistry::with_builtins();
+    let tool = reg
+        .get(tool_name)
+        .ok_or_else(|| anyhow::anyhow!("Unknown tool: {tool_name}"))?;
+    let ctx = ToolContext {
+        granted_folders,
+        web_search_enabled: false,
+        search_engine: SearchEngine::default(),
+        searxng_url: None,
+    };
+    let approval = ApprovalResponse::Tool(PermissionDecision::AllowOnce);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(tool.execute_approved(&ctx, args, &approval))
+}
+
+fn requested_ungranted_path(
+    granted_folders: &[GrantedFolder],
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<std::path::PathBuf> {
+    let reg = ToolRegistry::with_builtins();
+    let tool = reg.get(tool_name)?;
+    let perms = PermissionEngine::new();
+    let ctx = ToolPrepareContext {
+        conv_id: "test-conv",
+        granted_folders,
+        permissions: &perms,
+        web_search_enabled: false,
+        search_engine: SearchEngine::default(),
+        searxng_url: None,
+        local_texts: &[],
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    match rt.block_on(tool.prepare(&ctx, args)) {
+        ToolAuthorization::RequiresApproval { ungranted_path, .. } => ungranted_path,
+        _ => None,
+    }
+}
 
 #[test]
 fn path_jail_blocks_traversal_and_allows_rw() {
@@ -103,7 +221,10 @@ fn readonly_granted_folders_allow_reads_and_block_writes() {
         &json!({ "path": "allowed.txt", "content": "ok" }),
     )
     .unwrap();
-    assert_eq!(fs::read_to_string(granted.join("allowed.txt")).unwrap(), "ok");
+    assert_eq!(
+        fs::read_to_string(granted.join("allowed.txt")).unwrap(),
+        "ok"
+    );
     assert!(
         execute_tool_with_grants(&grants, "read_file", &json!({ "path": "/etc/passwd" })).is_err()
     );
@@ -238,60 +359,4 @@ fn argument_aliases_are_consistent_across_describe_ungranted_and_execute() {
     }
 
     let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn write_target_resolution_never_escalates_unrelated_readonly_folder() {
-    let base = std::env::temp_dir().join("companion_exact_write_target_test");
-    let _ = fs::remove_dir_all(&base);
-    let folder_a = base.join("folder_a");
-    let folder_b = base.join("folder_b");
-    fs::create_dir_all(&folder_a).unwrap();
-    fs::create_dir_all(&folder_b).unwrap();
-
-    let grants = vec![
-        GrantedFolder {
-            path: folder_a.clone(),
-            allow_write: false,
-        },
-        GrantedFolder {
-            path: folder_b.clone(),
-            allow_write: false,
-        },
-    ];
-
-    let target_in_a = folder_a.join("out.txt");
-    let resolved = resolve_target_folder_for_write(
-        &grants,
-        "write_file",
-        &json!({ "path": target_in_a.to_string_lossy(), "content": "hi" }),
-    );
-    assert_eq!(resolved, Some(folder_a.clone()));
-    assert_ne!(resolved, Some(folder_b.clone()));
-
-    let dir_in_a = folder_a.join("subdir");
-    assert_eq!(
-        resolve_target_folder_for_write(
-            &grants,
-            "create_directory",
-            &json!({ "directory": dir_in_a.to_string_lossy() }),
-        ),
-        Some(folder_a.clone())
-    );
-
-    let from_in_a = folder_a.join("old.txt");
-    fs::write(&from_in_a, "x").unwrap();
-    assert_eq!(
-        resolve_target_folder_for_write(
-            &grants,
-            "move_path",
-            &json!({
-                "from": from_in_a.to_string_lossy(),
-                "to": folder_a.join("new.txt").to_string_lossy()
-            }),
-        ),
-        Some(folder_a.clone())
-    );
-
-    let _ = fs::remove_dir_all(&base);
 }

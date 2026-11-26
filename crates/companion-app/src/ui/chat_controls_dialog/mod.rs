@@ -1,6 +1,7 @@
 //! Unified Chat Controls dialog: Thinking Level, Context Window, Usage, and System Prompt.
 
-use std::cell::RefCell;
+mod form_state;
+
 use std::path::Path;
 use std::rc::Rc;
 
@@ -14,6 +15,8 @@ use crate::models::gguf::{context_presets_up_to, format_context_label, format_sh
 use crate::models::{detect_gguf_max_context, friendly_model_name};
 use crate::storage::ModelRecord;
 
+use form_state::ChatControlsFormState;
+
 /// Configuration passed to [`present_chat_controls_dialog`].
 pub struct ChatControlsConfig<'a, F, M> {
     pub active_model: Option<&'a ModelRecord>,
@@ -24,6 +27,16 @@ pub struct ChatControlsConfig<'a, F, M> {
     pub current_prompt: &'a str,
     pub on_apply: F,
     pub on_manage_models: M,
+}
+
+struct SettingsSectionWidgets {
+    group: adw::PreferencesGroup,
+    manage_btn: gtk::Button,
+    thinking_row: adw::ComboRow,
+    ctx_row: adw::ComboRow,
+    form: Rc<ChatControlsFormState>,
+    rebuild_ctx: Rc<dyn Fn(u32, u32)>,
+    update_usage: Rc<dyn Fn(u32)>,
 }
 
 /// Present the unified Chat Controls [`adw::Dialog`].
@@ -53,30 +66,17 @@ pub fn present_chat_controls_dialog<F, M>(
     header.pack_end(&apply_btn);
     toolbar.add_top_bar(&header);
 
-    let (settings_group, manage_btn, thinking_row, ctx_row, ctx_presets, rebuild_ctx, init_max_ctx, update_usage) =
-        build_settings_section(&cfg);
+    let section = build_settings_section(&cfg);
     let (notes_group, text_view) = build_notes_section(cfg.assistant_name, cfg.current_prompt);
     let reset_btn = gtk::Button::builder()
-        .label(&gettext("Reset to Default"))
+        .label(gettext("Reset to Default"))
         .halign(gtk::Align::Start)
         .build();
 
-    wire_dirty_and_reset(DirtyResetRefs {
-        apply_btn: &apply_btn,
-        reset_btn: &reset_btn,
-        thinking_row: &thinking_row,
-        ctx_row: &ctx_row,
-        ctx_presets: &ctx_presets,
-        text_view: &text_view,
-        update_usage: &update_usage,
-        rebuild_ctx: &rebuild_ctx,
-        init_max_ctx,
-        active_model: cfg.active_model,
-        current_prompt: cfg.current_prompt,
-    });
+    wire_dirty_and_reset(&apply_btn, &reset_btn, &section, &text_view);
 
     let body = crate::ui::widgets::dialog_content_box();
-    body.append(&settings_group);
+    body.append(&section.group);
     body.append(&notes_group);
     body.append(&reset_btn);
     let scroller = gtk::ScrolledWindow::builder()
@@ -94,7 +94,7 @@ pub fn present_chat_controls_dialog<F, M>(
 
     let d_manage = dialog.clone();
     let on_manage = cfg.on_manage_models;
-    manage_btn.connect_clicked(move |_| {
+    section.manage_btn.connect_clicked(move |_| {
         d_manage.close();
         on_manage();
     });
@@ -102,13 +102,12 @@ pub fn present_chat_controls_dialog<F, M>(
     let d_apply = dialog.clone();
     let buf = text_view.buffer();
     let on_apply = cfg.on_apply;
+    let form = section.form.clone();
+    let thinking_row = section.thinking_row.clone();
+    let ctx_row = section.ctx_row.clone();
     apply_btn.connect_clicked(move |_| {
         let selected_thinking = ThinkingLevel::from_index(thinking_row.selected());
-        let selected_ctx = ctx_presets
-            .borrow()
-            .get(ctx_row.selected() as usize)
-            .copied()
-            .unwrap_or(4096);
+        let selected_ctx = form.selected_ctx(ctx_row.selected());
         let (start, end) = buf.bounds();
         let prompt_text = buf.text(&start, &end, false).trim().to_string();
         let final_prompt = if prompt_text.is_empty() {
@@ -123,26 +122,14 @@ pub fn present_chat_controls_dialog<F, M>(
     dialog.present(Some(parent));
 }
 
-#[allow(clippy::type_complexity)]
-fn build_settings_section<F, M>(
-    cfg: &ChatControlsConfig<'_, F, M>,
-) -> (
-    adw::PreferencesGroup,
-    gtk::Button,
-    adw::ComboRow,
-    adw::ComboRow,
-    Rc<RefCell<Vec<u32>>>,
-    Rc<dyn Fn(u32, u32)>,
-    u32,
-    Rc<dyn Fn(u32)>,
-) {
+fn build_settings_section<F, M>(cfg: &ChatControlsConfig<'_, F, M>) -> SettingsSectionWidgets {
     let settings_group = adw::PreferencesGroup::new();
     let active_model_name = cfg
         .active_model
         .map(|m| friendly_model_name(&m.display_name))
         .unwrap_or_else(|| gettext("No active AI model"));
     let manage_btn = gtk::Button::builder()
-        .label(&gettext("Manage"))
+        .label(gettext("Manage"))
         .tooltip_text(gettext("Manage AI Models"))
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
@@ -160,23 +147,48 @@ fn build_settings_section<F, M>(
         .subtitle(gettext("Reasoning effort for models that support thinking"))
         .model(&gtk::StringList::new(&thinking_refs))
         .build();
-    if let Some(idx) = ThinkingLevel::ALL.iter().position(|t| *t == cfg.current_thinking) {
-        thinking_row.set_selected(idx as u32);
-    }
+    let init_thinking_idx = ThinkingLevel::ALL
+        .iter()
+        .position(|t| *t == cfg.current_thinking)
+        .unwrap_or(0) as u32;
+    thinking_row.set_selected(init_thinking_idx);
 
     let init_max_ctx = cfg
         .active_model
         .and_then(|m| m.file_path.as_deref())
         .and_then(|p| detect_gguf_max_context(Path::new(p)))
         .unwrap_or(131072);
-    let ctx_presets: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
+    let default_thinking_idx = cfg
+        .active_model
+        .map(|m| m.default_thinking_level())
+        .and_then(|lvl| ThinkingLevel::ALL.iter().position(|t| *t == lvl))
+        .unwrap_or(0) as u32;
+    let init_presets = context_presets_up_to(init_max_ctx);
+    let init_ctx_val = init_presets
+        .iter()
+        .rfind(|&&v| v <= cfg.current_ctx.min(init_max_ctx))
+        .copied()
+        .unwrap_or(cfg.current_ctx.min(init_max_ctx));
+
+    let form = Rc::new(ChatControlsFormState::new(
+        init_thinking_idx,
+        init_ctx_val,
+        cfg.current_prompt,
+        init_max_ctx,
+        default_thinking_idx,
+        init_presets,
+    ));
+
     let ctx_row = adw::ComboRow::builder()
         .title(gettext("Context Window"))
         .build();
-
-    let usage_bar = gtk::ProgressBar::builder().valign(gtk::Align::Center).build();
+    let usage_bar = gtk::ProgressBar::builder()
+        .valign(gtk::Align::Center)
+        .build();
     usage_bar.set_size_request(110, -1);
-    let usage_row = adw::ActionRow::builder().title(gettext("Context Usage")).build();
+    let usage_row = adw::ActionRow::builder()
+        .title(gettext("Context Usage"))
+        .build();
     usage_row.add_suffix(&usage_bar);
 
     let used_tokens = cfg.used_tokens;
@@ -184,23 +196,15 @@ fn build_settings_section<F, M>(
         let usage_row = usage_row.clone();
         let usage_bar = usage_bar.clone();
         Rc::new(move |max_ctx: u32| {
-            let fraction = (used_tokens as f64 / max_ctx.max(1) as f64).clamp(0.0, 1.0);
-            let pct = (fraction * 100.0).round() as u32;
+            let (fraction, label) = ChatControlsFormState::format_usage(used_tokens, max_ctx);
             usage_bar.set_fraction(fraction);
-            usage_row.set_subtitle(&tr_f(
-                "{used} / {max} tokens ({pct}%)",
-                &[
-                    ("used", &used_tokens.to_string()),
-                    ("max", &max_ctx.to_string()),
-                    ("pct", &pct.to_string()),
-                ],
-            ));
+            usage_row.set_subtitle(&label);
         })
     };
 
     let rebuild_ctx: Rc<dyn Fn(u32, u32)> = {
         let ctx_row = ctx_row.clone();
-        let ctx_presets = ctx_presets.clone();
+        let form = form.clone();
         let update_usage = update_usage.clone();
         Rc::new(move |max_ctx: u32, target_ctx: u32| {
             let presets = context_presets_up_to(max_ctx);
@@ -209,7 +213,7 @@ fn build_settings_section<F, M>(
             let selected_val = presets.get(selected_idx).copied().unwrap_or(clamped);
             let labels: Vec<String> = presets.iter().map(|&v| format_context_label(v)).collect();
             let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-            *ctx_presets.borrow_mut() = presets;
+            *form.ctx_presets.borrow_mut() = presets;
             ctx_row.set_model(Some(&gtk::StringList::new(&label_refs)));
             ctx_row.set_selected(selected_idx as u32);
             ctx_row.set_subtitle(&tr_f(
@@ -226,19 +230,21 @@ fn build_settings_section<F, M>(
     settings_group.add(&ctx_row);
     settings_group.add(&usage_row);
 
-    (
-        settings_group,
+    SettingsSectionWidgets {
+        group: settings_group,
         manage_btn,
         thinking_row,
         ctx_row,
-        ctx_presets,
+        form,
         rebuild_ctx,
-        init_max_ctx,
         update_usage,
-    )
+    }
 }
 
-fn build_notes_section(assistant_name: &str, current_prompt: &str) -> (adw::PreferencesGroup, gtk::TextView) {
+fn build_notes_section(
+    assistant_name: &str,
+    current_prompt: &str,
+) -> (adw::PreferencesGroup, gtk::TextView) {
     let text_view = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
         .top_margin(10)
@@ -268,85 +274,51 @@ fn build_notes_section(assistant_name: &str, current_prompt: &str) -> (adw::Pref
     (notes_group, text_view)
 }
 
-struct DirtyResetRefs<'a> {
-    apply_btn: &'a gtk::Button,
-    reset_btn: &'a gtk::Button,
-    thinking_row: &'a adw::ComboRow,
-    ctx_row: &'a adw::ComboRow,
-    ctx_presets: &'a Rc<RefCell<Vec<u32>>>,
-    text_view: &'a gtk::TextView,
-    update_usage: &'a Rc<dyn Fn(u32)>,
-    rebuild_ctx: &'a Rc<dyn Fn(u32, u32)>,
-    init_max_ctx: u32,
-    active_model: Option<&'a ModelRecord>,
-    current_prompt: &'a str,
-}
-
-fn wire_dirty_and_reset(refs: DirtyResetRefs<'_>) {
-    let DirtyResetRefs {
-        apply_btn,
-        reset_btn,
-        thinking_row,
-        ctx_row,
-        ctx_presets,
-        text_view,
-        update_usage,
-        rebuild_ctx,
-        init_max_ctx,
-        active_model,
-        current_prompt,
-    } = refs;
-    let init_thinking_idx = thinking_row.selected();
-    let init_ctx_val = ctx_presets
-        .borrow()
-        .get(ctx_row.selected() as usize)
-        .copied()
-        .unwrap_or(4096);
-    let init_prompt = current_prompt.trim().to_string();
-
+fn wire_dirty_and_reset(
+    apply_btn: &gtk::Button,
+    reset_btn: &gtk::Button,
+    section: &SettingsSectionWidgets,
+    text_view: &gtk::TextView,
+) {
     let sync_apply: Rc<dyn Fn()> = {
-        let (apply_btn, thinking_row, ctx_row, ctx_presets, buf) = (
+        let (apply_btn, thinking_row, ctx_row, form, buf) = (
             apply_btn.clone(),
-            thinking_row.clone(),
-            ctx_row.clone(),
-            ctx_presets.clone(),
+            section.thinking_row.clone(),
+            section.ctx_row.clone(),
+            section.form.clone(),
             text_view.buffer(),
         );
         Rc::new(move || {
-            let cur_ctx = ctx_presets
-                .borrow()
-                .get(ctx_row.selected() as usize)
-                .copied()
-                .unwrap_or(4096);
             let (s, e) = buf.bounds();
-            let cur_prompt = buf.text(&s, &e, false).trim().to_string();
-            let dirty = thinking_row.selected() != init_thinking_idx
-                || cur_ctx != init_ctx_val
-                || cur_prompt != init_prompt;
-            apply_btn.set_sensitive(dirty);
+            let cur_prompt = buf.text(&s, &e, false);
+            apply_btn.set_sensitive(form.is_dirty(
+                thinking_row.selected(),
+                ctx_row.selected(),
+                &cur_prompt,
+            ));
         })
     };
 
     let s1 = sync_apply.clone();
-    thinking_row.connect_selected_notify(move |_| s1());
+    section.thinking_row.connect_selected_notify(move |_| s1());
 
-    let (cp, uu, s2) = (ctx_presets.clone(), update_usage.clone(), sync_apply.clone());
-    ctx_row.connect_selected_notify(move |row| {
-        if let Some(&val) = cp.borrow().get(row.selected() as usize) {
-            uu(val);
-        }
+    let (form, uu, s2) = (
+        section.form.clone(),
+        section.update_usage.clone(),
+        sync_apply.clone(),
+    );
+    section.ctx_row.connect_selected_notify(move |row| {
+        uu(form.selected_ctx(row.selected()));
         s2();
     });
 
     text_view.buffer().connect_changed(move |_| sync_apply());
 
-    let default_thinking_idx = active_model
-        .map(|m| m.default_thinking_level())
-        .and_then(|lvl| ThinkingLevel::ALL.iter().position(|t| *t == lvl))
-        .unwrap_or(0) as u32;
     let buf = text_view.buffer();
-    let tr = thinking_row.clone();
-    let rc = rebuild_ctx.clone();
+    let tr = section.thinking_row.clone();
+    let rc = section.rebuild_ctx.clone();
+    let init_max_ctx = section.form.init_max_ctx;
+    let default_thinking_idx = section.form.default_thinking_idx;
     reset_btn.connect_clicked(move |_| {
         buf.set_text(default_system_prompt());
         tr.set_selected(default_thinking_idx);

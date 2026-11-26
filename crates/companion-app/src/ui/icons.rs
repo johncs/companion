@@ -18,7 +18,8 @@ pub fn symbolic_image(icon_name: &str, pixel_size: i32) -> gtk::Image {
         .join(format!("{icon_name}.svg"));
 
     if dev_icon.exists() {
-        let paintable = gtk::IconPaintable::for_file(&gio::File::for_path(&dev_icon), pixel_size, 1);
+        let paintable =
+            gtk::IconPaintable::for_file(&gio::File::for_path(&dev_icon), pixel_size, 1);
         let img = gtk::Image::from_paintable(Some(&paintable));
         img.set_pixel_size(pixel_size);
         img

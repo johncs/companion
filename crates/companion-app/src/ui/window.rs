@@ -6,9 +6,10 @@ use relm4::prelude::*;
 use crate::core::paths::AppPaths;
 use crate::i18n::gettext;
 use crate::models::download_manager::DownloadManager;
+use crate::models::hardware::{HardwareInfo, probe_hardware};
 use crate::storage::{Conversation, Database, ModelRecord};
 use crate::ui::chat_view::{ChatViewModel, ChatViewMsg, ChatViewOutput};
-use crate::ui::preferences::present_settings_dialog;
+use crate::ui::preferences::{SettingsPage, present_settings_dialog};
 use crate::ui::sidebar::{SidebarModel, SidebarMsg, SidebarOutput};
 
 pub struct MainWindow {
@@ -18,7 +19,9 @@ pub struct MainWindow {
     sidebar: Controller<SidebarModel>,
     chat_view: Controller<ChatViewModel>,
     active_conversation: Option<Conversation>,
+    conv_select_seq: u64,
     active_model: Option<ModelRecord>,
+    hardware_info: Option<HardwareInfo>,
     toast_overlay: adw::ToastOverlay,
     split_view: adw::NavigationSplitView,
 }
@@ -26,15 +29,26 @@ pub struct MainWindow {
 #[derive(Debug)]
 pub enum MainWindowMsg {
     ConversationSelected(String),
-    ConversationRenamed { id: String, title: String },
+    ConversationLoaded {
+        request_seq: u64,
+        conv: Option<Conversation>,
+    },
+    ConversationRenamed {
+        id: String,
+        title: String,
+    },
     ConversationDeleted(String),
-    ChatRunningChanged { id: String, is_running: bool },
+    ChatRunningChanged {
+        id: String,
+        is_running: bool,
+    },
     ActiveModelChanged(Option<String>),
     PersonalizationChanged {
         assistant_name: String,
         user_name: Option<String>,
     },
     WebSearchGlobalChanged(bool),
+    HardwareProbed(HardwareInfo),
     OpenModelManager,
     OpenPreferences,
     ShowToast(String),
@@ -140,18 +154,22 @@ impl SimpleComponent for MainWindow {
     ) -> ComponentParts<Self> {
         crate::ui::load_css();
 
-        let sidebar = SidebarModel::builder().launch(db.clone()).forward(
-            sender.input_sender(),
-            |output| match output {
-                SidebarOutput::ConversationSelected(id) => MainWindowMsg::ConversationSelected(id),
-                SidebarOutput::ConversationRenamed { id, title } => {
-                    MainWindowMsg::ConversationRenamed { id, title }
-                }
-                SidebarOutput::ConversationDeleted(id) => MainWindowMsg::ConversationDeleted(id),
-                SidebarOutput::OpenSettings => MainWindowMsg::OpenPreferences,
-                SidebarOutput::ShowToast(text) => MainWindowMsg::ShowToast(text),
-            },
-        );
+        let sidebar =
+            SidebarModel::builder()
+                .launch(db.clone())
+                .forward(sender.input_sender(), |output| match output {
+                    SidebarOutput::ConversationSelected(id) => {
+                        MainWindowMsg::ConversationSelected(id)
+                    }
+                    SidebarOutput::ConversationRenamed { id, title } => {
+                        MainWindowMsg::ConversationRenamed { id, title }
+                    }
+                    SidebarOutput::ConversationDeleted(id) => {
+                        MainWindowMsg::ConversationDeleted(id)
+                    }
+                    SidebarOutput::OpenSettings => MainWindowMsg::OpenPreferences,
+                    SidebarOutput::ShowToast(text) => MainWindowMsg::ShowToast(text),
+                });
 
         let saved_model = db
             .get_active_model_id()
@@ -175,9 +193,16 @@ impl SimpleComponent for MainWindow {
                 .into_iter()
                 .filter_map(|m| m.file_path.map(std::path::PathBuf::from))
                 .collect();
-            crate::models::gguf::warm_gguf_metadata_cache(paths);
+            crate::models::gguf::GgufMetadataCache::new()
+                .warm(paths, crate::core::runtime().handle());
         }
         crate::core::runtime().spawn_blocking(crate::core::markdown::warm_syntax_highlighting);
+        {
+            let input_sender = sender.input_sender().clone();
+            crate::core::runtime().spawn_blocking(move || {
+                let _ = input_sender.send(MainWindowMsg::HardwareProbed(probe_hardware()));
+            });
+        }
 
         let chat_view = ChatViewModel::builder()
             .launch((db.clone(), initial_model_id))
@@ -199,7 +224,11 @@ impl SimpleComponent for MainWindow {
         let toast_overlay = adw::ToastOverlay::new();
         let split_view = adw::NavigationSplitView::new();
 
-        let download_manager = DownloadManager::new(db.clone(), paths.models_dir.clone());
+        let download_manager = DownloadManager::new(
+            db.clone(),
+            paths.models_dir.clone(),
+            crate::core::runtime().handle().clone(),
+        );
         let model = Self {
             db,
             paths,
@@ -207,7 +236,9 @@ impl SimpleComponent for MainWindow {
             sidebar,
             chat_view,
             active_conversation: None,
+            conv_select_seq: 0,
             active_model,
+            hardware_info: None,
             toast_overlay: toast_overlay.clone(),
             split_view: split_view.clone(),
         };
@@ -219,8 +250,23 @@ impl SimpleComponent for MainWindow {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             MainWindowMsg::ConversationSelected(conv_id) => {
-                self.active_conversation = self.db.get_conversation(&conv_id).ok().flatten();
-
+                self.conv_select_seq = self.conv_select_seq.wrapping_add(1);
+                let req_seq = self.conv_select_seq;
+                let db = self.db.clone();
+                let input_sender = sender.input_sender().clone();
+                crate::core::runtime().spawn_blocking(move || {
+                    let conv = db.get_conversation(&conv_id).ok().flatten();
+                    let _ = input_sender.send(MainWindowMsg::ConversationLoaded {
+                        request_seq: req_seq,
+                        conv,
+                    });
+                });
+            }
+            MainWindowMsg::ConversationLoaded { request_seq, conv } => {
+                if self.conv_select_seq != request_seq {
+                    return;
+                }
+                self.active_conversation = conv;
                 if let Some(conv) = &self.active_conversation {
                     self.chat_view.emit(ChatViewMsg::LoadConversation {
                         conversation_id: conv.id.clone(),
@@ -240,7 +286,8 @@ impl SimpleComponent for MainWindow {
                 self.sidebar.emit(SidebarMsg::RefreshLists);
             }
             MainWindowMsg::ConversationDeleted(id) => {
-                self.chat_view.emit(ChatViewMsg::CancelConversation(id.clone()));
+                self.chat_view
+                    .emit(ChatViewMsg::CancelConversation(id.clone()));
                 if self.active_conversation.as_ref().map(|c| c.id.as_str()) == Some(&id) {
                     self.active_conversation = None;
                     self.chat_view.emit(ChatViewMsg::ClearConversation);
@@ -266,15 +313,18 @@ impl SimpleComponent for MainWindow {
                 self.chat_view
                     .emit(ChatViewMsg::RefreshWebSearchGlobal(enabled));
             }
+            MainWindowMsg::HardwareProbed(hw) => {
+                self.hardware_info = Some(hw);
+            }
             MainWindowMsg::ChatRunningChanged { id, is_running } => {
                 self.sidebar
                     .emit(SidebarMsg::SetConversationRunning { id, is_running });
             }
             MainWindowMsg::OpenModelManager => {
-                self.open_settings("models", &sender);
+                self.open_settings(SettingsPage::Models, &sender);
             }
             MainWindowMsg::OpenPreferences => {
-                self.open_settings("general", &sender);
+                self.open_settings(SettingsPage::General, &sender);
             }
             MainWindowMsg::ShowToast(text) => {
                 self.toast_overlay.add_toast(adw::Toast::new(&text));
@@ -287,29 +337,63 @@ impl SimpleComponent for MainWindow {
 }
 
 impl MainWindow {
-    fn open_settings(&self, initial_page: &str, sender: &ComponentSender<Self>) {
-        let active_id = self.active_model.as_ref().map(|m| m.id.clone());
-        let sender_model = sender.clone();
-        let sender_name = sender.clone();
-        let sender_web = sender.clone();
+    fn open_settings(&self, initial_page: SettingsPage, sender: &ComponentSender<Self>) {
+        let launcher = SettingsLauncher {
+            toast_overlay: self.toast_overlay.clone(),
+            db: self.db.clone(),
+            models_dir: self.paths.models_dir.clone(),
+            download_manager: self.download_manager.clone(),
+            active_model_id: self.active_model.as_ref().map(|m| m.id.clone()),
+            sender: sender.clone(),
+        };
+        if let Some(hw) = self.hardware_info.clone() {
+            launcher.present(initial_page, hw);
+            return;
+        }
+        crate::ui::widgets::spawn_blocking_ui(probe_hardware, move |hw| {
+            launcher
+                .sender
+                .input(MainWindowMsg::HardwareProbed(hw.clone()));
+            launcher.present(initial_page, hw);
+        });
+    }
+}
+
+struct SettingsLauncher {
+    toast_overlay: adw::ToastOverlay,
+    db: Database,
+    models_dir: std::path::PathBuf,
+    download_manager: DownloadManager,
+    active_model_id: Option<String>,
+    sender: ComponentSender<MainWindow>,
+}
+
+impl SettingsLauncher {
+    fn present(&self, initial_page: SettingsPage, hw: HardwareInfo) {
+        let sender_model = self.sender.clone();
+        let sender_name = self.sender.clone();
+        let sender_web = self.sender.clone();
         present_settings_dialog(
             &self.toast_overlay,
-            self.db.clone(),
-            self.paths.models_dir.clone(),
-            self.download_manager.clone(),
-            active_id,
-            initial_page,
-            move |new_id| {
-                sender_model.input(MainWindowMsg::ActiveModelChanged(new_id));
-            },
-            move |new_name, new_user| {
-                sender_name.input(MainWindowMsg::PersonalizationChanged {
-                    assistant_name: new_name,
-                    user_name: new_user,
-                });
-            },
-            move |enabled| {
-                sender_web.input(MainWindowMsg::WebSearchGlobalChanged(enabled));
+            crate::ui::preferences::SettingsDialogConfig {
+                db: self.db.clone(),
+                models_dir: self.models_dir.clone(),
+                download_manager: self.download_manager.clone(),
+                hardware_info: hw,
+                active_model_id: self.active_model_id.clone(),
+                initial_page,
+                on_active_changed: move |new_id| {
+                    sender_model.input(MainWindowMsg::ActiveModelChanged(new_id));
+                },
+                on_personalization_changed: move |new_name, new_user| {
+                    sender_name.input(MainWindowMsg::PersonalizationChanged {
+                        assistant_name: new_name,
+                        user_name: new_user,
+                    });
+                },
+                on_web_search_global_changed: move |enabled| {
+                    sender_web.input(MainWindowMsg::WebSearchGlobalChanged(enabled));
+                },
             },
         );
     }

@@ -11,15 +11,32 @@ use super::path_guard::resolve_granted_path;
 pub(super) const MAX_LIST_ENTRIES: usize = 200;
 const MAX_SEARCH_HITS: usize = 50;
 const MAX_READ_BYTES: usize = 100 * 1024;
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".flatpak-builder", "dist", "build"];
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".flatpak-builder",
+    "dist",
+    "build",
+];
 
 /// List files in `granted_root` (bounded, skipping `.git`, `target`, `node_modules`, and `.gitignore`).
-pub fn list_granted_files(granted_root: &Path, subdir: &str, max_entries: usize) -> Result<Vec<String>> {
+pub fn list_granted_files(
+    granted_root: &Path,
+    subdir: &str,
+    max_entries: usize,
+) -> Result<Vec<String>> {
     let start = resolve_granted_path(granted_root, subdir)?;
     let root_canon = fs::canonicalize(granted_root)?;
     let ignored = load_gitignore_names(&root_canon);
     let mut out = Vec::new();
-    collect_files(&root_canon, &start, &ignored, max_entries.min(MAX_LIST_ENTRIES), &mut out);
+    collect_files(
+        &root_canon,
+        &start,
+        &ignored,
+        max_entries.min(MAX_LIST_ENTRIES),
+        &mut out,
+    );
     out.sort();
     Ok(out)
 }
@@ -104,7 +121,8 @@ pub fn delete_granted_file(granted_root: &Path, rel_path: &str) -> Result<String
 /// Create a directory (and any missing parents) inside `granted_root`.
 pub fn create_granted_directory(granted_root: &Path, rel_path: &str) -> Result<String> {
     let target = resolve_granted_path(granted_root, rel_path)?;
-    fs::create_dir_all(&target).with_context(|| format!("Failed to create directory {rel_path}"))?;
+    fs::create_dir_all(&target)
+        .with_context(|| format!("Failed to create directory {rel_path}"))?;
     Ok(format!("Created directory {rel_path}"))
 }
 
@@ -142,7 +160,8 @@ pub fn delete_granted_directory(granted_root: &Path, rel_path: &str) -> Result<S
     if target == root_canon {
         bail!("Cannot delete the granted root directory itself");
     }
-    fs::remove_dir_all(&target).with_context(|| format!("Failed to delete directory {rel_path}"))?;
+    fs::remove_dir_all(&target)
+        .with_context(|| format!("Failed to delete directory {rel_path}"))?;
     Ok(format!("Deleted directory {rel_path}"))
 }
 

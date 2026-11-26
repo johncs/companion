@@ -120,7 +120,10 @@ pub fn present_folder_drop_confirm_dialog<F>(
     F: FnOnce(FolderDropGrantChoice) + 'static,
 {
     let alert = adw::AlertDialog::builder()
-        .heading(tr_f("Grant access to \"{folder}\"?", &[("folder", folder_name)]))
+        .heading(tr_f(
+            "Grant access to \"{folder}\"?",
+            &[("folder", folder_name)],
+        ))
         .body(gettext(
             "Choose whether Companion may read or also modify files in this folder:",
         ))
@@ -145,9 +148,7 @@ pub fn present_folder_drop_confirm_dialog<F>(
         .margin_end(12)
         .build();
 
-    let card = gtk::Box::builder()
-        .css_classes(["card"])
-        .build();
+    let card = gtk::Box::builder().css_classes(["card"]).build();
     card.append(&path_label);
     alert.set_extra_child(Some(&card));
 

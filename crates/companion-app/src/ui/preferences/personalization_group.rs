@@ -22,7 +22,9 @@ where
 {
     let identity_group = adw::PreferencesGroup::builder()
         .title(gettext("Companion Identity"))
-        .description(gettext("Give your companion a name and choose its character."))
+        .description(gettext(
+            "Give your companion a name and choose its character.",
+        ))
         .build();
 
     let behavior_group = adw::PreferencesGroup::builder()
@@ -122,13 +124,17 @@ fn make_behavior_refresher(
         let user = db.get_user_name().ok().flatten();
         syncing.set(true);
         if personality == AssistantPersonality::Custom {
-            let text = db.get_custom_personality().ok().flatten().unwrap_or_else(|| {
-                let seed = last_preset
-                    .get()
-                    .prompt_guidance("{assistant_name}", user.as_ref().map(|_| "{user_name}"));
-                let _ = db.set_custom_personality(&seed);
-                seed
-            });
+            let text = db
+                .get_custom_personality()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    let seed = last_preset
+                        .get()
+                        .prompt_guidance("{assistant_name}", user.as_ref().map(|_| "{user_name}"));
+                    let _ = db.set_custom_personality(&seed);
+                    seed
+                });
             buf.set_text(&text);
             view.set_editable(true);
             view.set_sensitive(true);
@@ -277,7 +283,8 @@ fn wire_behavior_editor(
         if syncing.get() {
             return;
         }
-        if db_changed.get_assistant_personality().unwrap_or_default() == AssistantPersonality::Custom
+        if db_changed.get_assistant_personality().unwrap_or_default()
+            == AssistantPersonality::Custom
         {
             let (start, end) = buf.bounds();
             let _ = db_changed.set_custom_personality(&buf.text(&start, &end, false));
@@ -285,7 +292,8 @@ fn wire_behavior_editor(
     });
     let focus = gtk::EventControllerFocus::new();
     focus.connect_leave(move |_| {
-        if db_focus.get_assistant_personality().unwrap_or_default() == AssistantPersonality::Custom {
+        if db_focus.get_assistant_personality().unwrap_or_default() == AssistantPersonality::Custom
+        {
             let buf = buf_ref.borrow();
             let (start, end) = buf.bounds();
             let _ = db_focus.set_custom_personality(&buf.text(&start, &end, false));

@@ -6,12 +6,12 @@ use std::path::Path;
 use anyhow::Result;
 use uuid::Uuid;
 
-use companion_core::model_params::ModelParams;
 use crate::huggingface::RECOMMENDED_STARTER_REPO;
 use crate::{
     detect_gguf_supports_thinking, discover_managed_models_in, friendly_model_name,
     infer_quantization,
 };
+use companion_core::model_params::ModelParams;
 use companion_storage::{Database, ModelRecord};
 
 /// Coordinates filesystem GGUF discovery with the SQLite model registry.
@@ -116,7 +116,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("companion_sync_{}", uuid::Uuid::new_v4()));
         let models_dir = dir.join("models");
         std::fs::create_dir_all(&models_dir).unwrap();
-        let db = Database::open(&dir.join("test.db")).expect("open test db");
+        let db = Database::open(dir.join("test.db")).expect("open test db");
 
         // 1. Empty DB + empty directory -> stays empty, active_model_id is None.
         ModelRegistryService::sync_managed_models(&db, &models_dir).unwrap();
@@ -159,7 +159,7 @@ mod tests {
     fn starter_model_defaults_to_cpu_mode() {
         let dir = std::env::temp_dir().join(format!("companion_starter_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = Database::open(&dir.join("test.db")).expect("open test db");
+        let db = Database::open(dir.join("test.db")).expect("open test db");
         let dummy_gguf = dir.join("model.gguf");
         std::fs::write(&dummy_gguf, b"GGUF").unwrap();
 

@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 
+use crate::core::types::MessageRole;
 use crate::i18n::gettext;
 use crate::storage::AttachmentRecord;
 use crate::ui::message_object::{MessageEntry, MessageObject};
@@ -36,7 +37,7 @@ fn bind_entry_inner(
     assistant_name: &str,
     user_name: Option<&str>,
 ) {
-    let is_user = entry.role == "user";
+    let is_user = entry.role == MessageRole::User;
     let same_message = *widgets.rendered_message_id.borrow() == entry.id;
 
     if !same_message {
@@ -59,7 +60,9 @@ fn bind_entry_inner(
     }
     widgets.copy_btn.set_visible(has_text);
     widgets.edit_btn.set_visible(is_user && !entry.is_streaming);
-    widgets.delete_btn.set_visible(is_user && !entry.is_streaming);
+    widgets
+        .delete_btn
+        .set_visible(is_user && !entry.is_streaming);
     widgets
         .actions_box
         .set_visible(has_text || (is_user && !entry.is_streaming));
@@ -98,8 +101,12 @@ fn apply_role_style(
         widgets.card.set_margin_end(0);
         widgets.header_row.set_visible(true);
         widgets.header_row.set_halign(gtk::Align::End);
-        widgets.avatar_icon.set_icon_name(Some("avatar-default-symbolic"));
-        widgets.role_label.set_text(user_name.unwrap_or(&gettext("You")));
+        widgets
+            .avatar_icon
+            .set_icon_name(Some("avatar-default-symbolic"));
+        widgets
+            .role_label
+            .set_text(user_name.unwrap_or(&gettext("You")));
         widgets.actions_box.set_halign(gtk::Align::End);
         widgets.actions_box.set_margin_start(0);
     } else {

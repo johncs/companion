@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use companion_storage::ConversationFolder;
+
+use crate::tool::{ApprovalRequest, ToolAuthorization, ToolPrepareContext, ToolRisk};
 
 #[derive(Debug, Clone)]
 pub struct GrantedFolder {
@@ -12,17 +14,69 @@ pub struct GrantedFolder {
     pub allow_write: bool,
 }
 
-/// Shared argument aliases for file/path tools.
-pub const PATH_ALIASES: &[&str] = &["path", "file_path", "filepath", "file"];
-/// Shared argument aliases for directory tools.
-pub const DIR_ALIASES: &[&str] = &["path", "directory"];
-/// Shared argument aliases for `list_files`.
-pub const LIST_ALIASES: &[&str] = &["subdir", "path", "directory"];
+/// Shared pre-flight authorization for workspace file/directory tools.
+pub(super) fn prepare_workspace_auth(
+    ctx: &ToolPrepareContext<'_>,
+    tool_name: &str,
+    risk: ToolRisk,
+    raw_target: Option<&str>,
+    write_target_folder: Option<PathBuf>,
+    preview: String,
+) -> ToolAuthorization {
+    let needs_write = matches!(risk, ToolRisk::WriteWorkspace | ToolRisk::Destructive);
+    let ungranted_path = resolve_ungranted_raw(ctx.granted_folders, raw_target, needs_write);
+    let write_already_granted = write_target_folder.as_ref().is_some_and(|folder| {
+        ctx.granted_folders
+            .iter()
+            .any(|g| g.allow_write && &g.path == folder)
+    });
+    let auto_allowed = ungranted_path.is_none()
+        && (ctx.permissions.is_auto_allowed(
+            ctx.conv_id,
+            write_target_folder.as_deref(),
+            tool_name,
+            risk,
+        ) || (risk == ToolRisk::WriteWorkspace && write_already_granted));
 
-/// Return the first non-null string argument matching any key in `keys`.
-pub fn first_str_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+    if auto_allowed {
+        ToolAuthorization::AutoAllowed
+    } else {
+        ToolAuthorization::RequiresApproval {
+            request: ApprovalRequest::ToolAction {
+                tool_name: tool_name.to_string(),
+                preview,
+                risk,
+                ungranted_path: ungranted_path.clone(),
+            },
+            ungranted_path,
+            write_target_folder,
+        }
+    }
+}
+
+/// If `candidate` is already inside (or equal to) a granted directory in `entries`, return that folder's display name.
+pub fn find_covering_granted_folder(
+    entries: &[ConversationFolder],
+    candidate: &Path,
+) -> Option<String> {
+    let cand_canon = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    for entry in entries {
+        let entry_path = Path::new(&entry.folder_path);
+        if !entry_path.is_dir() {
+            continue;
+        }
+        let dir_canon = fs::canonicalize(entry_path).unwrap_or_else(|_| entry_path.to_path_buf());
+        if cand_canon.starts_with(&dir_canon) {
+            let name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&entry.folder_path)
+                .to_string();
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Resolve `rel_path` strictly inside `granted_root`, rejecting any `..` or outside symlink escape.
@@ -86,38 +140,10 @@ pub(super) fn sanitize_tool_path(raw: &str) -> &str {
     }
 }
 
-/// If a tool call targets an existing absolute path outside `granted_folders`, return its canonical path.
-#[cfg(test)]
-pub fn requested_ungranted_path(
-    granted_folders: &[GrantedFolder],
-    tool_name: &str,
-    args: &Value,
-) -> Option<PathBuf> {
-    let raw_path = extract_raw_target_path(tool_name, args);
-    let require_write = matches!(
-        tool_name,
-        "write_file" | "delete_file" | "create_directory" | "move_path" | "delete_directory"
-    );
-    resolve_ungranted_raw(granted_folders, raw_path, require_write)
-}
-
-/// Shared raw target-path extraction used by `requested_ungranted_path` and `Tool::raw_target_path`.
-pub fn extract_raw_target_path<'a>(tool_name: &str, args: &'a Value) -> Option<&'a str> {
-    let root = first_str_arg(args, &["root"]);
-    match tool_name {
-        "read_file" | "delete_file" => root.or_else(|| first_str_arg(args, PATH_ALIASES)),
-        "write_file" => root.or_else(|| first_str_arg(args, PATH_ALIASES)),
-        "create_directory" | "delete_directory" => {
-            root.or_else(|| first_str_arg(args, DIR_ALIASES))
-        }
-        "move_path" | "search_files" => root,
-        "list_files" => root.or_else(|| first_str_arg(args, LIST_ALIASES)),
-        _ => None,
-    }
-}
-
 /// Resolve an ungranted canonical path from a raw path argument.
-pub fn resolve_ungranted_raw(
+/// For non-existent absolute targets (e.g. a new file in an ungranted folder),
+/// walks up to the nearest existing ancestor so the target cannot bypass approval.
+pub(super) fn resolve_ungranted_raw(
     granted_folders: &[GrantedFolder],
     raw_path: Option<&str>,
     require_write: bool,
@@ -125,10 +151,32 @@ pub fn resolve_ungranted_raw(
     let raw_path = raw_path?;
     let cleaned = sanitize_tool_path(raw_path);
     let req = Path::new(cleaned);
-    if !req.is_absolute() || !req.exists() {
+    if !req.is_absolute() {
         return None;
     }
-    let target_canon = fs::canonicalize(req).ok()?;
+    let target_canon = if req.exists() {
+        fs::canonicalize(req).ok()?
+    } else {
+        let existing_ancestor = req.ancestors().find(|a| a.exists())?;
+        let canon_ancestor = fs::canonicalize(existing_ancestor).ok()?;
+        let rel = req.strip_prefix(existing_ancestor).ok()?;
+        if rel.components().any(|c| matches!(c, Component::ParentDir)) {
+            return None;
+        }
+        let allowed_roots = collect_allowed_roots(granted_folders, require_write);
+        let already_covered = allowed_roots.iter().any(|root| {
+            if root.is_file() {
+                canon_ancestor == *root
+            } else {
+                canon_ancestor.starts_with(root)
+            }
+        });
+        return if already_covered {
+            None
+        } else {
+            Some(canon_ancestor)
+        };
+    };
     let allowed_roots = collect_allowed_roots(granted_folders, require_write);
     let already_covered = allowed_roots.iter().any(|root| {
         if root.is_file() {
@@ -145,18 +193,11 @@ pub fn resolve_ungranted_raw(
 }
 
 /// Resolve the **exact** [`GrantedFolder::path`] targeted by a write tool, if it falls under one.
-pub fn resolve_target_folder_for_write(
+pub(super) fn resolve_write_folder_for_raw(
     granted_folders: &[GrantedFolder],
-    tool_name: &str,
-    args: &Value,
+    raw_path: &str,
+    root_override: Option<&str>,
 ) -> Option<PathBuf> {
-    let root_override = first_str_arg(args, &["root"]);
-    let raw_path = match tool_name {
-        "write_file" | "delete_file" => first_str_arg(args, PATH_ALIASES)?,
-        "create_directory" | "delete_directory" => first_str_arg(args, DIR_ALIASES)?,
-        "move_path" => first_str_arg(args, &["from"])?,
-        _ => return None,
-    };
     let (matched_root, _) =
         resolve_granted_root_inner(granted_folders, raw_path, root_override, false, true).ok()?;
     granted_folders
@@ -164,43 +205,6 @@ pub fn resolve_target_folder_for_write(
         .find(|g| fs::canonicalize(&g.path).ok().as_ref() == Some(&matched_root))
         .map(|g| g.path.clone())
         .or(Some(matched_root))
-}
-
-/// Return `true` if a non-destructive write tool targets a folder already granted as Read & Write.
-pub fn is_write_already_granted(
-    granted_folders: &[GrantedFolder],
-    tool_name: &str,
-    args: &Value,
-) -> bool {
-    let root_override = first_str_arg(args, &["root"]);
-    match tool_name {
-        "write_file" => {
-            let Some(path) = first_str_arg(args, PATH_ALIASES) else {
-                return false;
-            };
-            resolve_granted_root(granted_folders, path, root_override, true).is_ok()
-        }
-        "create_directory" => {
-            let Some(path) = first_str_arg(args, DIR_ALIASES) else {
-                return false;
-            };
-            resolve_granted_root(granted_folders, path, root_override, true).is_ok()
-        }
-        "move_path" => {
-            let (Some(from), Some(to)) = (
-                first_str_arg(args, &["from"]),
-                first_str_arg(args, &["to"]),
-            ) else {
-                return false;
-            };
-            let Ok((root, _)) = resolve_granted_root(granted_folders, from, root_override, true)
-            else {
-                return false;
-            };
-            resolve_granted_root(granted_folders, to, Some(&root.to_string_lossy()), true).is_ok()
-        }
-        _ => false,
-    }
 }
 
 pub(super) fn collect_allowed_roots(
@@ -251,10 +255,12 @@ fn resolve_granted_root_inner(
     }
 
     if let Some(ov) = root_override.map(str::trim).filter(|s| !s.is_empty()) {
-        let ov_canon = fs::canonicalize(ov)
-            .with_context(|| format!("Granted folder unavailable: {ov}"))?;
+        let ov_canon =
+            fs::canonicalize(ov).with_context(|| format!("Granted folder unavailable: {ov}"))?;
         if let Some(matched) = allowed_roots.into_iter().find(|r| ov_canon.starts_with(r)) {
-            let rel_prefix = ov_canon.strip_prefix(&matched).unwrap_or_else(|_| Path::new(""));
+            let rel_prefix = ov_canon
+                .strip_prefix(&matched)
+                .unwrap_or_else(|_| Path::new(""));
             let combined = if raw_path.trim().is_empty() || raw_path == "." {
                 rel_prefix.to_string_lossy().to_string()
             } else if rel_prefix.as_os_str().is_empty() {
@@ -262,7 +268,11 @@ fn resolve_granted_root_inner(
             } else {
                 rel_prefix.join(raw_path).to_string_lossy().to_string()
             };
-            let rel_final = if combined.is_empty() { ".".to_string() } else { combined };
+            let rel_final = if combined.is_empty() {
+                ".".to_string()
+            } else {
+                combined
+            };
             return Ok((matched, rel_final));
         }
         bail!(
@@ -302,7 +312,11 @@ fn resolve_granted_root_inner(
                 let rel_str = rel.to_string_lossy().to_string();
                 return Ok((
                     root.clone(),
-                    if rel_str.is_empty() { ".".to_string() } else { rel_str },
+                    if rel_str.is_empty() {
+                        ".".to_string()
+                    } else {
+                        rel_str
+                    },
                 ));
             }
         }
@@ -322,42 +336,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitize_tool_path_strips_quotes_and_whitespace() {
-        assert_eq!(sanitize_tool_path("  \"src/main.rs\"  "), "src/main.rs");
-        assert_eq!(sanitize_tool_path(" 'notes.md' "), "notes.md");
-        assert_eq!(sanitize_tool_path("plain.txt"), "plain.txt");
-    }
+    fn detects_file_or_subfolder_inside_granted_directory() {
+        let root = std::env::temp_dir().join("companion_folder_cover_test");
+        let _ = fs::remove_dir_all(&root);
+        let granted_dir = root.join("Photos");
+        let sub_dir = granted_dir.join("Raw");
+        let sibling_dir = root.join("Other");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::create_dir_all(&sibling_dir).unwrap();
+        let inside_file = granted_dir.join("PERSON.md");
+        let outside_file = sibling_dir.join("notes.txt");
+        fs::write(&inside_file, "hi").unwrap();
+        fs::write(&outside_file, "bye").unwrap();
 
-    #[test]
-    fn resolve_granted_root_handles_override_and_multi_root_ambiguity() {
-        let base = std::env::temp_dir().join(format!("companion_pg_{}", uuid::Uuid::new_v4()));
-        let dir_a = base.join("a");
-        let dir_b = base.join("b");
-        let sub_a = dir_a.join("sub");
-        fs::create_dir_all(&sub_a).unwrap();
-        fs::create_dir_all(&dir_b).unwrap();
+        let entries = vec![ConversationFolder {
+            id: "1".to_string(),
+            conversation_id: "c1".to_string(),
+            folder_path: granted_dir.to_string_lossy().to_string(),
+            permission_mode: companion_core::types::FolderPermission::Read,
+            created_at: 0,
+        }];
+        assert_eq!(
+            find_covering_granted_folder(&entries, &inside_file).as_deref(),
+            Some("Photos")
+        );
+        assert_eq!(
+            find_covering_granted_folder(&entries, &sub_dir).as_deref(),
+            Some("Photos")
+        );
+        assert_eq!(find_covering_granted_folder(&entries, &outside_file), None);
 
-        let grants = vec![
-            GrantedFolder {
-                path: dir_a.clone(),
-                allow_write: false,
-            },
-            GrantedFolder {
-                path: dir_b.clone(),
-                allow_write: false,
-            },
-        ];
-
-        // Relative path with multiple granted roots and no override must error.
-        assert!(resolve_granted_root(&grants, "file.txt", None, false).is_err());
-
-        // Override inside a granted root resolves relative to that root.
-        let (root, rel) =
-            resolve_granted_root(&grants, "file.txt", Some(&sub_a.to_string_lossy()), false)
-                .unwrap();
-        assert_eq!(root, fs::canonicalize(&dir_a).unwrap());
-        assert_eq!(rel, "sub/file.txt");
-
-        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&root);
     }
 }

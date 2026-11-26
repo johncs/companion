@@ -55,11 +55,7 @@ where
     });
 }
 
-pub(super) fn lookup_and_enable_vision(
-    ui: VisionRowUi,
-    ctx: &VisionSetupCtx,
-    model: ModelRecord,
-) {
+pub(super) fn lookup_and_enable_vision(ui: VisionRowUi, ctx: &VisionSetupCtx, model: ModelRecord) {
     ui.btn.set_sensitive(false);
     ui.controls.pct_label.set_text("");
     ui.controls.pause_btn.set_visible(false);
@@ -189,7 +185,12 @@ fn present_manual_vision_guide(
 
     let ctx_cb = ctx.clone();
     alert.connect_response(None, move |_, resp| match resp {
-        "select" => select_local_mmproj(&ctx_cb.dialog, &ctx_cb.db, &ctx_cb.refresh_installed, &model),
+        "select" => select_local_mmproj(
+            &ctx_cb.dialog,
+            &ctx_cb.db,
+            &ctx_cb.refresh_installed,
+            &model,
+        ),
         "explore" => {
             let query = friendly_model_name(&model.display_name);
             let subpage = build_explore_subpage_with_query(&ctx_cb.hf_ctx, Some(&query));
@@ -228,9 +229,8 @@ fn select_local_mmproj(
                 move |res| match res {
                     Ok(()) => {
                         refresh();
-                        dialog_toast.add_toast(adw::Toast::new(&gettext(
-                            "Enabled Vision projector",
-                        )));
+                        dialog_toast
+                            .add_toast(adw::Toast::new(&gettext("Enabled Vision projector")));
                     }
                     Err(err) => {
                         dialog_toast.add_toast(adw::Toast::new(&tr_f(

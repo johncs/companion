@@ -104,7 +104,10 @@ impl MentionPicker {
             if st.granted_files.is_empty() {
                 (None, Vec::new())
             } else if let Some((offset, query)) = extract_mention_query(&before_cursor) {
-                (Some(offset), filter_mention_matches(&st.granted_files, query))
+                (
+                    Some(offset),
+                    filter_mention_matches(&st.granted_files, query),
+                )
             } else {
                 (None, Vec::new())
             }
@@ -166,17 +169,11 @@ impl MentionPicker {
         }
 
         let loc = self.text_view.iter_location(&cursor_iter);
-        let (wx, wy) = self.text_view.buffer_to_window_coords(
-            gtk::TextWindowType::Widget,
-            loc.x(),
-            loc.y(),
-        );
-        self.popover.set_pointing_to(Some(&gdk::Rectangle::new(
-            wx,
-            wy,
-            1,
-            loc.height().max(16),
-        )));
+        let (wx, wy) =
+            self.text_view
+                .buffer_to_window_coords(gtk::TextWindowType::Widget, loc.x(), loc.y());
+        self.popover
+            .set_pointing_to(Some(&gdk::Rectangle::new(wx, wy, 1, loc.height().max(16))));
         if !self.popover.is_visible() {
             self.popover.popup();
         }
@@ -219,11 +216,7 @@ impl MentionPicker {
         if count <= 0 {
             return;
         }
-        let current = self
-            .list_box
-            .selected_row()
-            .map(|r| r.index())
-            .unwrap_or(0);
+        let current = self.list_box.selected_row().map(|r| r.index()).unwrap_or(0);
         let next = (current + delta).clamp(0, count - 1);
         if let Some(row) = self.list_box.row_at_index(next) {
             self.list_box.select_row(Some(&row));

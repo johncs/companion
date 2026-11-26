@@ -1,6 +1,6 @@
 //! Chat Agent core: sandboxed folder/file tools, permission engine, and tool-call parser.
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod approval;
 pub mod coalescer;

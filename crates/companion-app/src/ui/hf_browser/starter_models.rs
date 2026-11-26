@@ -51,19 +51,14 @@ pub fn build_starter_model_row(ctx: &HfBrowserContext) -> adw::ActionRow {
     let downloading_label =
         build_status_badge(&gettext("Downloading"), !is_installed && is_downloading);
     let download_btn = gtk::Button::builder()
-        .label(&gettext("Download"))
+        .label(gettext("Download"))
         .valign(gtk::Align::Center)
         .css_classes(["suggested-action"])
         .visible(!is_installed && !is_downloading)
         .build();
 
-    let on_pause: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    let on_cancel: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    wire_control_buttons(&controls, &on_pause, &on_cancel);
     let ui = StarterUi {
         controls: controls.clone(),
-        on_pause: on_pause.clone(),
-        on_cancel: on_cancel.clone(),
         installed_label: installed_label.clone(),
     };
     wire_starter_download_button(&download_btn, ui, &resolved_starter, ctx);
@@ -136,30 +131,9 @@ fn build_status_badge(label: &str, visible: bool) -> gtk::Label {
         .build()
 }
 
-fn wire_control_buttons(
-    controls: &DownloadControls,
-    on_pause: &Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-    on_cancel: &Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-) {
-    let pause_cb = on_pause.clone();
-    controls.pause_btn.connect_clicked(move |_| {
-        if let Some(cb) = pause_cb.borrow().clone() {
-            cb();
-        }
-    });
-    let cancel_cb = on_cancel.clone();
-    controls.cancel_btn.connect_clicked(move |_| {
-        if let Some(cb) = cancel_cb.borrow().clone() {
-            cb();
-        }
-    });
-}
-
 #[derive(Clone)]
 struct StarterUi {
     controls: DownloadControls,
-    on_pause: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-    on_cancel: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     installed_label: gtk::Label,
 }
 
@@ -246,8 +220,6 @@ fn launch_starter_download(
         RowDownloadUi {
             btn: btn.clone(),
             controls: ui.controls.clone(),
-            on_pause: ui.on_pause.clone(),
-            on_cancel: ui.on_cancel.clone(),
         },
     );
 }

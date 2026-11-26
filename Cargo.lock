@@ -307,7 +307,6 @@ name = "companion-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "gettext-rs",
  "pdf-extract",
  "pulldown-cmark",

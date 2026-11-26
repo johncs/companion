@@ -1,17 +1,19 @@
-//! Streaming token coalescing and incremental Markdown parsing on Tokio.
+//! Throttled UI stream coalescer for token bursts and incremental Markdown parsing.
 
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use crate::parser::strip_tool_calls;
-use companion_core::markdown::{CodeHighlightCache, MarkdownBlock, parse_markdown_blocks_streaming};
-use companion_core::runtime;
+use companion_core::markdown::{
+    CodeHighlightCache, MarkdownBlock, parse_markdown_blocks_streaming,
+};
 use companion_core::provider::ChatEvent;
 
 const STREAM_UI_FLUSH_INTERVAL: Duration = Duration::from_millis(80);
 
-/// Coalesced update emitted by [`spawn_stream_coalescer`].
+/// Coalesced UI update emitted for a single inference step.
+#[derive(Debug, Clone)]
 pub enum StreamStepUpdate {
     Status(String),
     Snapshot {
@@ -32,14 +34,105 @@ pub enum StreamStepUpdate {
     },
 }
 
-/// Join accumulated answer prefix and current step visible text.
-pub fn combine_answer(prefix: &str, step_visible: &str) -> String {
-    if prefix.is_empty() {
-        step_visible.to_string()
-    } else if step_visible.is_empty() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}\n\n{step_visible}")
+/// Join multi-step answer segments with a blank line when continuing after a tool call.
+pub fn combine_answer(prefix: &str, step_answer: &str) -> String {
+    match (prefix.is_empty(), step_answer.is_empty()) {
+        (true, _) => step_answer.to_string(),
+        (_, true) => prefix.to_string(),
+        (false, false) => format!("{prefix}\n\n{step_answer}"),
+    }
+}
+
+/// Pure, timer-free state machine that buffers token bursts and produces [`StreamStepUpdate`]s.
+pub struct StreamCoalescerState {
+    full_answer_prefix: String,
+    full_reasoning: String,
+    step_answer: String,
+    last_combined: String,
+    code_cache: CodeHighlightCache,
+    dirty: bool,
+}
+
+pub enum CoalescerAction {
+    Continue,
+    Forward(StreamStepUpdate),
+    Finish,
+}
+
+impl StreamCoalescerState {
+    pub fn new(full_answer_prefix: String, full_reasoning: String) -> Self {
+        Self {
+            full_answer_prefix,
+            full_reasoning,
+            step_answer: String::new(),
+            last_combined: String::new(),
+            code_cache: CodeHighlightCache::new(),
+            dirty: false,
+        }
+    }
+
+    pub fn push_event(&mut self, ev: ChatEvent) -> CoalescerAction {
+        match ev {
+            ChatEvent::Status(status) => {
+                if self.full_answer_prefix.is_empty() && self.full_reasoning.is_empty() {
+                    CoalescerAction::Forward(StreamStepUpdate::Status(status))
+                } else {
+                    CoalescerAction::Continue
+                }
+            }
+            ChatEvent::Token(t) => {
+                self.step_answer.push_str(&t);
+                self.dirty = true;
+                CoalescerAction::Continue
+            }
+            ChatEvent::ReasoningToken(r) => {
+                self.full_reasoning.push_str(&r);
+                self.dirty = true;
+                CoalescerAction::Continue
+            }
+            ChatEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+                decode_ms,
+            } => CoalescerAction::Forward(StreamStepUpdate::Usage {
+                prompt_tokens,
+                completion_tokens,
+                decode_ms,
+            }),
+            ChatEvent::Notice(msg) => CoalescerAction::Forward(StreamStepUpdate::Notice(msg)),
+            ChatEvent::Error(err) => CoalescerAction::Forward(StreamStepUpdate::Error(err)),
+            ChatEvent::Done => CoalescerAction::Finish,
+        }
+    }
+
+    pub fn flush(&mut self) -> StreamStepUpdate {
+        let visible_step = strip_tool_calls(&self.step_answer);
+        let combined = combine_answer(&self.full_answer_prefix, &visible_step);
+        let blocks = if combined != self.last_combined {
+            self.last_combined = combined.clone();
+            Some(parse_markdown_blocks_streaming(
+                &combined,
+                &mut self.code_cache,
+            ))
+        } else {
+            None
+        };
+        let reasoning = (!self.full_reasoning.is_empty()).then(|| self.full_reasoning.clone());
+        self.dirty = false;
+        StreamStepUpdate::Snapshot {
+            combined,
+            blocks,
+            reasoning,
+        }
+    }
+
+    pub fn finish(mut self) -> (Option<StreamStepUpdate>, StreamStepUpdate) {
+        let trailing = if self.dirty { Some(self.flush()) } else { None };
+        let done = StreamStepUpdate::Done {
+            step_answer: self.step_answer,
+            full_reasoning: self.full_reasoning,
+        };
+        (trailing, done)
     }
 }
 
@@ -61,39 +154,16 @@ pub fn spawn_stream_coalescer(
 pub fn spawn_stream_coalescer_with_interval(
     mut raw_rx: mpsc::UnboundedReceiver<ChatEvent>,
     full_answer_prefix: String,
-    mut full_reasoning: String,
+    full_reasoning: String,
     flush_interval: Duration,
 ) -> mpsc::UnboundedReceiver<StreamStepUpdate> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
-    runtime().spawn(async move {
-        let mut step_answer = String::new();
-        let mut last_combined = String::new();
-        let mut code_cache = CodeHighlightCache::new();
+    tokio::spawn(async move {
+        let mut state = StreamCoalescerState::new(full_answer_prefix, full_reasoning);
         let mut last_flush = Instant::now();
-        let mut dirty = false;
-
-        let flush = |step_answer: &str,
-                     full_reasoning: &str,
-                     last_combined: &mut String,
-                     code_cache: &mut CodeHighlightCache| {
-            let visible_step = strip_tool_calls(step_answer);
-            let combined = combine_answer(&full_answer_prefix, &visible_step);
-            let blocks = if combined != *last_combined {
-                *last_combined = combined.clone();
-                Some(parse_markdown_blocks_streaming(&combined, code_cache))
-            } else {
-                None
-            };
-            let reasoning = (!full_reasoning.is_empty()).then(|| full_reasoning.to_string());
-            let _ = ui_tx.send(StreamStepUpdate::Snapshot {
-                combined,
-                blocks,
-                reasoning,
-            });
-        };
 
         loop {
-            let ev_opt = if dirty {
+            let ev_opt = if state.dirty {
                 let deadline = tokio::time::Instant::from_std(last_flush + flush_interval);
                 tokio::select! {
                     biased;
@@ -104,85 +174,38 @@ pub fn spawn_stream_coalescer_with_interval(
                 Some(raw_rx.recv().await)
             };
 
+            let mut finished = false;
             match ev_opt {
-                Some(None) => {
-                    let _ = ui_tx.send(StreamStepUpdate::Done {
-                        step_answer,
-                        full_reasoning,
-                    });
-                    break;
-                }
+                Some(None) => finished = true,
                 Some(Some(first_ev)) => {
-                    let mut done = false;
                     let mut pending = Some(first_ev);
                     while let Some(ev) = pending.take().or_else(|| raw_rx.try_recv().ok()) {
-                        match ev {
-                            ChatEvent::Status(status) => {
-                                if full_answer_prefix.is_empty() && full_reasoning.is_empty() {
-                                    let _ = ui_tx.send(StreamStepUpdate::Status(status));
-                                }
+                        match state.push_event(ev) {
+                            CoalescerAction::Continue => {}
+                            CoalescerAction::Forward(update) => {
+                                let _ = ui_tx.send(update);
                             }
-                            ChatEvent::Token(t) => {
-                                step_answer.push_str(&t);
-                                dirty = true;
-                            }
-                            ChatEvent::ReasoningToken(r) => {
-                                full_reasoning.push_str(&r);
-                                dirty = true;
-                            }
-                            ChatEvent::Usage {
-                                prompt_tokens,
-                                completion_tokens,
-                                decode_ms,
-                            } => {
-                                let _ = ui_tx.send(StreamStepUpdate::Usage {
-                                    prompt_tokens,
-                                    completion_tokens,
-                                    decode_ms,
-                                });
-                            }
-                            ChatEvent::Notice(msg) => {
-                                let _ = ui_tx.send(StreamStepUpdate::Notice(msg));
-                            }
-                            ChatEvent::Error(err) => {
-                                let _ = ui_tx.send(StreamStepUpdate::Error(err));
-                            }
-                            ChatEvent::Done => {
-                                done = true;
+                            CoalescerAction::Finish => {
+                                finished = true;
                                 break;
                             }
                         }
                     }
-                    if done {
-                        let _ = ui_tx.send(StreamStepUpdate::Done {
-                            step_answer,
-                            full_reasoning,
-                        });
-                        break;
-                    }
-                    if dirty && last_flush.elapsed() >= flush_interval {
-                        flush(
-                            &step_answer,
-                            &full_reasoning,
-                            &mut last_combined,
-                            &mut code_cache,
-                        );
-                        dirty = false;
-                        last_flush = Instant::now();
-                    }
                 }
-                None => {
-                    if dirty {
-                        flush(
-                            &step_answer,
-                            &full_reasoning,
-                            &mut last_combined,
-                            &mut code_cache,
-                        );
-                        dirty = false;
-                        last_flush = Instant::now();
-                    }
+                None => {}
+            }
+
+            if finished {
+                let (trailing, done) = state.finish();
+                if let Some(snap) = trailing {
+                    let _ = ui_tx.send(snap);
                 }
+                let _ = ui_tx.send(done);
+                break;
+            }
+            if state.dirty && last_flush.elapsed() >= flush_interval {
+                let _ = ui_tx.send(state.flush());
+                last_flush = Instant::now();
             }
         }
     });
@@ -201,43 +224,85 @@ mod tests {
     }
 
     #[test]
-    fn coalescer_strips_tool_calls_and_emits_done() {
-        runtime().block_on(async {
-            let (tx, rx) = mpsc::unbounded_channel();
-            let mut out = spawn_stream_coalescer_with_interval(
-                rx,
-                String::new(),
-                String::new(),
-                Duration::from_millis(10),
-            );
+    fn state_machine_strips_tool_calls_and_flushes_on_finish() {
+        let mut state = StreamCoalescerState::new(String::new(), String::new());
+        assert!(matches!(
+            state.push_event(ChatEvent::Token("Hello ".into())),
+            CoalescerAction::Continue
+        ));
+        assert!(matches!(
+            state.push_event(ChatEvent::Token(
+                "<tool_call>{\"name\":\"list_files\"}</tool_call>".into()
+            )),
+            CoalescerAction::Continue
+        ));
+        assert!(matches!(
+            state.push_event(ChatEvent::Done),
+            CoalescerAction::Finish
+        ));
 
-            let _ = tx.send(ChatEvent::Status("Generating...".into()));
-            let _ = tx.send(ChatEvent::Token("Hello ".into()));
-            let _ = tx.send(ChatEvent::Token(
-                "<tool_call>{\"name\":\"list_files\"}</tool_call>".into(),
-            ));
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            let _ = tx.send(ChatEvent::Done);
+        let (trailing, done) = state.finish();
+        assert!(matches!(
+            trailing,
+            Some(StreamStepUpdate::Snapshot { ref combined, .. }) if combined == "Hello"
+        ));
+        assert!(matches!(
+            done,
+            StreamStepUpdate::Done { ref step_answer, .. } if step_answer.contains("<tool_call>")
+        ));
+    }
 
-            let mut snapshots = Vec::new();
-            let mut done_answer = None;
-            while let Some(ev) = out.recv().await {
-                match ev {
-                    StreamStepUpdate::Snapshot { combined, .. } => snapshots.push(combined),
-                    StreamStepUpdate::Done { step_answer, .. } => {
-                        done_answer = Some(step_answer);
-                        break;
-                    }
-                    _ => {}
-                }
+    #[tokio::test]
+    async fn flushes_dirty_trailing_tokens_before_done() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut out = spawn_stream_coalescer_with_interval(
+            rx,
+            String::new(),
+            String::new(),
+            Duration::from_secs(60),
+        );
+
+        let _ = tx.send(ChatEvent::Token("final-tail".into()));
+        let _ = tx.send(ChatEvent::Done);
+
+        let mut snapshots = Vec::new();
+        while let Some(ev) = out.recv().await {
+            match ev {
+                StreamStepUpdate::Snapshot { combined, .. } => snapshots.push(combined),
+                StreamStepUpdate::Done { .. } => break,
+                _ => {}
             }
+        }
+        assert_eq!(snapshots.last().map(String::as_str), Some("final-tail"));
+    }
 
-            assert!(snapshots.iter().any(|s| s == "Hello"));
-            assert!(
-                done_answer
-                    .as_deref()
-                    .is_some_and(|s| s.contains("<tool_call>"))
-            );
-        });
+    #[tokio::test]
+    async fn timer_flushes_buffered_tokens_after_interval() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut out =
+            spawn_stream_coalescer_with_interval(rx, String::new(), String::new(), Duration::ZERO);
+
+        let _ = tx.send(ChatEvent::Token("hello ".into()));
+        let ev = out.recv().await.expect("timed flush snapshot");
+        assert!(matches!(
+            ev,
+            StreamStepUpdate::Snapshot { ref combined, .. } if combined == "hello"
+        ));
+        drop(tx);
+    }
+
+    #[test]
+    fn status_events_are_suppressed_on_continuation_steps() {
+        let mut state = StreamCoalescerState::new("Earlier answer".into(), String::new());
+        assert!(matches!(
+            state.push_event(ChatEvent::Status("Generating…".into())),
+            CoalescerAction::Continue
+        ));
+
+        let mut fresh = StreamCoalescerState::new(String::new(), String::new());
+        assert!(matches!(
+            fresh.push_event(ChatEvent::Status("Generating…".into())),
+            CoalescerAction::Forward(StreamStepUpdate::Status(ref s)) if s == "Generating…"
+        ));
     }
 }

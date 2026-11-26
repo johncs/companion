@@ -11,6 +11,7 @@ use crate::storage::ModelRecord;
 use crate::ui::widgets::spawn_blocking_ui;
 
 use super::{ComposerModel, ComposerMsg, ComposerOutput};
+use crate::ui::mention_picker::MentionPicker;
 
 /// Parse a `text/uri-list` clipboard payload into existing local file paths.
 pub(super) fn parse_uri_list_paths(text: &str) -> Vec<PathBuf> {
@@ -41,6 +42,55 @@ pub(super) fn compute_context_usage_pct(used_tokens: u32, max_ctx: u32) -> u32 {
     ((used_tokens as f64 / max_ctx.max(1) as f64) * 100.0)
         .round()
         .clamp(0.0, 100.0) as u32
+}
+
+/// Attach Enter-to-send and mention-picker key handling to the composer `TextView`.
+pub(super) fn attach_key_controller(
+    text_view: &gtk::TextView,
+    mention_picker: &MentionPicker,
+    sender: &ComponentSender<ComposerModel>,
+) {
+    let key_ctrl = gtk::EventControllerKey::new();
+    let sender_clone = sender.clone();
+    let picker_key = mention_picker.clone();
+    key_ctrl.connect_key_pressed(move |_, key, _, mods| {
+        if let Some(prop) = picker_key.handle_key(key) {
+            return prop;
+        }
+        if (key == gdk::Key::Return || key == gdk::Key::KP_Enter)
+            && !mods.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            sender_clone.input(ComposerMsg::SendPressed);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    text_view.add_controller(key_ctrl);
+}
+
+/// Attach drag-and-drop file handling onto the composer card.
+pub(super) fn attach_file_drop_target(
+    composer_card: &gtk::Box,
+    sender: &ComponentSender<ComposerModel>,
+) {
+    let drop_target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    let sender_drop = sender.clone();
+    drop_target.connect_drop(move |_, value, _, _| {
+        if let Ok(file_list) = value.get::<gdk::FileList>() {
+            let paths: Vec<PathBuf> = file_list
+                .files()
+                .into_iter()
+                .filter_map(|f| f.path())
+                .collect();
+            if !paths.is_empty() {
+                sender_drop.input(ComposerMsg::FilesDropped(paths));
+                return true;
+            }
+        }
+        false
+    });
+    composer_card.add_controller(drop_target);
 }
 
 /// Handle image/file paste into the composer, or trim trailing blank lines on text paste.

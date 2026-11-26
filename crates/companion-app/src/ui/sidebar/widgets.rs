@@ -66,7 +66,10 @@ pub(super) fn build_sidebar_loading_row(text: &str) -> gtk::ListBoxRow {
         .build()
 }
 
-pub(super) fn build_sidebar_error_row(text: &str, on_retry: impl Fn() + 'static) -> gtk::ListBoxRow {
+pub(super) fn build_sidebar_error_row(
+    text: &str,
+    on_retry: impl Fn() + 'static,
+) -> gtk::ListBoxRow {
     let box_ = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)

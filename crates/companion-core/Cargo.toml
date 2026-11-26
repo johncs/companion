@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
 gettext-rs.workspace = true
 pdf-extract.workspace = true
 pulldown-cmark.workspace = true

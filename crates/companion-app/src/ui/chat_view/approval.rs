@@ -72,7 +72,8 @@ impl ApprovalHandler for GtkApprovalHandler {
                     }
                 }
             });
-            rx.await.unwrap_or_else(|_| ApprovalResponse::Tool(PermissionDecision::Deny))
+            rx.await
+                .unwrap_or(ApprovalResponse::Tool(PermissionDecision::Deny))
         })
     }
 }

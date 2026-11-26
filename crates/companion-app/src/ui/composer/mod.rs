@@ -8,7 +8,6 @@ mod toolbar;
 use std::path::PathBuf;
 
 use adw::prelude::*;
-use gtk::{gdk, glib};
 use relm4::prelude::*;
 
 use crate::core::ThinkingLevel;
@@ -20,7 +19,10 @@ use crate::ui::mention_picker::MentionPicker;
 use attachments::{
     AttachmentQueue, enqueue_dropped_paths, open_attach_file_dialog, rebuild_chips_box,
 };
-use input_helpers::{attach_clipboard_paste_handler, attach_dynamic_height_scaler};
+use input_helpers::{
+    attach_clipboard_paste_handler, attach_dynamic_height_scaler, attach_file_drop_target,
+    attach_key_controller,
+};
 
 #[derive(Debug)]
 pub enum ComposerMsg {
@@ -240,24 +242,7 @@ impl SimpleComponent for ComposerModel {
         let globe_btn = gtk::Button::new();
         let controls_btn = gtk::Button::new();
         let mention_picker = MentionPicker::attach(&text_view);
-
-        let key_ctrl = gtk::EventControllerKey::new();
-        let sender_clone = sender.clone();
-        let picker_key = mention_picker.clone();
-        key_ctrl.connect_key_pressed(move |_, key, _, mods| {
-            if let Some(prop) = picker_key.handle_key(key) {
-                return prop;
-            }
-            if (key == gdk::Key::Return || key == gdk::Key::KP_Enter)
-                && !mods.contains(gdk::ModifierType::SHIFT_MASK)
-            {
-                sender_clone.input(ComposerMsg::SendPressed);
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
-            }
-        });
-        text_view.add_controller(key_ctrl);
+        attach_key_controller(&text_view, &mention_picker, &sender);
 
         let assistant_name = db
             .get_assistant_name()
@@ -291,24 +276,7 @@ impl SimpleComponent for ComposerModel {
         model.refresh_attach_button();
 
         let widgets = view_output!();
-
-        let drop_target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
-        let sender_drop = sender.clone();
-        drop_target.connect_drop(move |_, value, _, _| {
-            if let Ok(file_list) = value.get::<gdk::FileList>() {
-                let paths: Vec<PathBuf> = file_list
-                    .files()
-                    .into_iter()
-                    .filter_map(|f| f.path())
-                    .collect();
-                if !paths.is_empty() {
-                    sender_drop.input(ComposerMsg::FilesDropped(paths));
-                    return true;
-                }
-            }
-            false
-        });
-        widgets.composer_card.add_controller(drop_target);
+        attach_file_drop_target(&widgets.composer_card, &sender);
 
         let placeholder = widgets.placeholder.clone();
         let picker_buf = mention_picker;
@@ -382,7 +350,9 @@ impl SimpleComponent for ComposerModel {
                 thinking_level,
                 system_prompt,
                 context_length,
-            } => self.handle_controls_applied(thinking_level, system_prompt, context_length, &sender),
+            } => {
+                self.handle_controls_applied(thinking_level, system_prompt, context_length, &sender)
+            }
             ComposerMsg::OpenModelSettings => {
                 let _ = sender.output(ComposerOutput::OpenModelSettings);
             }

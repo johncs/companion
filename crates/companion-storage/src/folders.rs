@@ -84,7 +84,8 @@ impl Database {
                     created_at: row.get(4)?,
                 })
             })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
         })
     }
 
@@ -106,7 +107,10 @@ impl Database {
     /// Revoke a granted folder from a conversation.
     pub fn remove_conversation_folder(&self, id: &str) -> Result<()> {
         self.with_conn(|conn| {
-            conn.execute("DELETE FROM conversation_folders WHERE id = ?1", params![id])?;
+            conn.execute(
+                "DELETE FROM conversation_folders WHERE id = ?1",
+                params![id],
+            )?;
             Ok(())
         })
     }

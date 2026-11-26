@@ -1,6 +1,6 @@
 //! Inference provider abstraction and embedded `llama.cpp` backend.
 
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub use companion_core::provider;
 

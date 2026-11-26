@@ -14,9 +14,9 @@ use llama_cpp_2::mtmd::{MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputTex
 use llama_cpp_2::sampling::LlamaSampler;
 use tokio::sync::mpsc;
 
-use companion_core::provider::{ChatEvent, ChatTurn, InferenceParams};
 use crate::stop_filter::{StopOutput, StopSequenceFilter};
 use crate::think_parser::{ParsedChunk, ThinkStreamParser};
+use companion_core::provider::{ChatEvent, ChatTurn, InferenceParams};
 
 use super::prompt::{format_chat_prompt, trim_turns_to_budget};
 use super::{LlamaCppProvider, get_backend};
@@ -26,6 +26,23 @@ enum StopReason {
     Cancelled,
     ContextLimit,
     MaxTokens,
+}
+
+struct PromptEvalResult<'a> {
+    ctx: LlamaContext<'a>,
+    pos: i32,
+    prompt_tokens: u32,
+    ctx_size: u32,
+}
+
+struct InferenceRun<'a> {
+    backend: &'a LlamaBackend,
+    model: &'a LlamaModel,
+    params: &'a InferenceParams,
+    ui_friendly_threads: i32,
+    n_batch: usize,
+    cancel_flag: &'a AtomicBool,
+    tx: &'a mpsc::UnboundedSender<ChatEvent>,
 }
 
 pub(super) fn run_inference_blocking(
@@ -38,7 +55,9 @@ pub(super) fn run_inference_blocking(
 ) -> Result<()> {
     let backend = get_backend()?;
     let model = provider.get_or_load_model(&backend, model_path, params.n_gpu_layers, tx)?;
-    let _ = tx.send(ChatEvent::Status(companion_core::i18n::gettext("Generating…")));
+    let _ = tx.send(ChatEvent::Status(companion_core::i18n::gettext(
+        "Generating…",
+    )));
 
     if cancel_flag.load(Ordering::Relaxed) {
         return Ok(());
@@ -66,54 +85,219 @@ pub(super) fn run_inference_blocking(
 
     let (ui_friendly_threads, n_batch) = compute_thread_config(params.n_gpu_layers);
     let mut batch = LlamaBatch::new(n_batch, 1);
-
-    let (mut ctx, pos, prompt_token_count, ctx_size) = if let Some(mmproj_path) = active_mmproj {
-        eval_multimodal_prompt(
-            &backend,
-            &model,
-            mmproj_path,
-            &image_paths,
-            prompt,
-            params,
-            ui_friendly_threads,
-            n_batch,
-        )?
-    } else {
-        let Some(state) = eval_text_prompt(
-            &backend,
-            &model,
-            &prompt,
-            params,
-            ui_friendly_threads,
-            n_batch,
-            &mut batch,
-            cancel_flag,
-        )?
-        else {
-            return Ok(());
-        };
-        state
-    };
-
-    let (stop_reason, completion_tokens, decode_ms) = run_decode_loop(
-        &model,
-        &mut ctx,
-        &mut batch,
-        pos,
-        ctx_size,
+    let run = InferenceRun {
+        backend: &backend,
+        model: &model,
         params,
-        initial_close_tag,
+        ui_friendly_threads,
+        n_batch,
         cancel_flag,
         tx,
-    )?;
+    };
+
+    let Some(mut eval) = run.eval_prompt(active_mmproj, &image_paths, prompt, &mut batch)? else {
+        return Ok(());
+    };
+    let (stop_reason, completion_tokens, decode_ms) =
+        run.run_decode_loop(&mut eval, &mut batch, initial_close_tag)?;
 
     emit_stop_notice(stop_reason, tx);
     let _ = tx.send(ChatEvent::Usage {
-        prompt_tokens: prompt_token_count,
+        prompt_tokens: eval.prompt_tokens,
         completion_tokens,
         decode_ms: Some(decode_ms),
     });
     Ok(())
+}
+
+impl<'a> InferenceRun<'a> {
+    fn eval_prompt(
+        &self,
+        active_mmproj: Option<&str>,
+        image_paths: &[&str],
+        prompt: String,
+        batch: &mut LlamaBatch,
+    ) -> Result<Option<PromptEvalResult<'a>>> {
+        if let Some(mmproj_path) = active_mmproj {
+            self.eval_multimodal_prompt(mmproj_path, image_paths, prompt)
+                .map(Some)
+        } else {
+            self.eval_text_prompt(&prompt, batch)
+        }
+    }
+
+    fn eval_multimodal_prompt(
+        &self,
+        mmproj_path: &str,
+        image_paths: &[&str],
+        prompt: String,
+    ) -> Result<PromptEvalResult<'a>> {
+        let mut mtmd_ctx = self.init_mtmd_context(mmproj_path)?;
+        let mut bitmaps = Vec::with_capacity(image_paths.len());
+        for img_path in image_paths {
+            let bmp = MtmdBitmap::from_file(&mtmd_ctx, img_path, false)
+                .map_err(|e| anyhow!("Failed to decode image {img_path}: {e}"))?;
+            bitmaps.push(bmp);
+        }
+        let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
+        let chunks = mtmd_ctx
+            .tokenize(
+                MtmdInputText {
+                    text: prompt,
+                    add_special: true,
+                    parse_special: true,
+                },
+                &bitmap_refs,
+            )
+            .map_err(|e| anyhow!("Multimodal tokenization failed: {e}"))?;
+
+        let ctx_size = self.params.n_ctx.max((chunks.total_tokens() as u32) + 512);
+        let mut ctx = self.new_context(ctx_size)?;
+        let new_pos = chunks
+            .eval_chunks(&mut mtmd_ctx, &mut ctx, 0, 0, self.n_batch as i32, true)
+            .map_err(|e| anyhow!("Vision prompt evaluation failed: {e}"))?;
+        Ok(PromptEvalResult {
+            ctx,
+            pos: new_pos,
+            prompt_tokens: new_pos.max(0) as u32,
+            ctx_size,
+        })
+    }
+
+    fn init_mtmd_context(&self, mmproj_path: &str) -> Result<MtmdContext> {
+        let gpu_params = MtmdContextParams {
+            use_gpu: self.params.n_gpu_layers > 0,
+            n_threads: self.ui_friendly_threads,
+            ..MtmdContextParams::default()
+        };
+        MtmdContext::init_from_file(mmproj_path, self.model, &gpu_params)
+            .or_else(|_| {
+                let cpu_params = MtmdContextParams {
+                    use_gpu: false,
+                    n_threads: self.ui_friendly_threads,
+                    ..MtmdContextParams::default()
+                };
+                MtmdContext::init_from_file(mmproj_path, self.model, &cpu_params)
+            })
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to load vision projector ({mmproj_path}): {e}. Ensure it matches this model in Settings → Models."
+                )
+            })
+    }
+
+    fn eval_text_prompt(
+        &self,
+        prompt: &str,
+        batch: &mut LlamaBatch,
+    ) -> Result<Option<PromptEvalResult<'a>>> {
+        let tokens = self.model.vocab().tokenize(prompt.as_bytes(), true, true);
+        let ctx_size = self.params.n_ctx.max((tokens.len() as u32) + 256);
+        let mut ctx = self.new_context(ctx_size)?;
+
+        let mut pos = 0i32;
+        for chunk in tokens.chunks(self.n_batch) {
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            batch.clear();
+            for (idx, &tok) in chunk.iter().enumerate() {
+                let is_last_overall = (pos as usize + idx + 1) == tokens.len();
+                batch.add(tok, pos + idx as i32, &[0], is_last_overall)?;
+            }
+            ctx.decode(batch).context("Prompt decode failed")?;
+            pos += chunk.len() as i32;
+            yield_for_ui(self.params.n_gpu_layers);
+        }
+        Ok(Some(PromptEvalResult {
+            ctx,
+            pos,
+            prompt_tokens: tokens.len() as u32,
+            ctx_size,
+        }))
+    }
+
+    fn new_context(&self, ctx_size: u32) -> Result<LlamaContext<'a>> {
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(ctx_size))
+            .with_n_threads(self.ui_friendly_threads)
+            .with_n_threads_batch(self.ui_friendly_threads);
+        self.model
+            .new_context(self.backend, ctx_params)
+            .context("Failed to create llama.cpp context")
+    }
+
+    fn run_decode_loop(
+        &self,
+        eval: &mut PromptEvalResult<'a>,
+        batch: &mut LlamaBatch,
+        initial_close_tag: Option<&'static str>,
+    ) -> Result<(StopReason, u32, u64)> {
+        let vocab = self.model.vocab();
+        let mut sampler = build_sampler(self.params.temperature);
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut think_parser = match initial_close_tag {
+            Some(tag) => ThinkStreamParser::starting_in_think(tag),
+            None => ThinkStreamParser::new(),
+        };
+        let mut stop_filter = StopSequenceFilter::new();
+        let mut completion_tokens = 0u32;
+        let gen_start = std::time::Instant::now();
+        let mut stop_reason = StopReason::MaxTokens;
+
+        for _ in 0..self.params.max_tokens {
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                stop_reason = StopReason::Cancelled;
+                break;
+            }
+            let token = sampler.sample(&eval.ctx, -1);
+            sampler.accept(token);
+            if vocab.is_eog(token) {
+                stop_reason = StopReason::Natural;
+                break;
+            }
+            completion_tokens += 1;
+
+            let output_bytes = vocab.token_to_piece(token, true, None);
+            let mut piece = String::with_capacity(output_bytes.len());
+            let _ = decoder.decode_to_string(&output_bytes, &mut piece, false);
+
+            match stop_filter.push(&piece) {
+                StopOutput::Emit(safe) if !safe.is_empty() => {
+                    emit_parsed(&think_parser.push(&safe), self.tx);
+                }
+                StopOutput::Emit(_) => {}
+                StopOutput::Stopped { emit } => {
+                    if !emit.is_empty() {
+                        emit_parsed(&think_parser.push(&emit), self.tx);
+                    }
+                    stop_reason = StopReason::Natural;
+                    break;
+                }
+            }
+
+            if eval.pos >= eval.ctx_size as i32 {
+                stop_reason = StopReason::ContextLimit;
+                break;
+            }
+            batch.clear();
+            batch.add(token, eval.pos, &[0], true)?;
+            eval.pos += 1;
+            eval.ctx.decode(batch).context("Token decode failed")?;
+            yield_for_ui(self.params.n_gpu_layers);
+        }
+
+        let remaining = stop_filter.finish();
+        if !remaining.is_empty() {
+            emit_parsed(&think_parser.push(&remaining), self.tx);
+        }
+        emit_parsed(&think_parser.finish(), self.tx);
+        Ok((
+            stop_reason,
+            completion_tokens,
+            gen_start.elapsed().as_millis() as u64,
+        ))
+    }
 }
 
 /// Keep ggml CPU/barrier usage light so Cairo UI rendering and the compositor stay responsive.
@@ -126,110 +310,6 @@ fn compute_thread_config(n_gpu_layers: u32) -> (i32, usize) {
         .clamp(1, max_threads);
     let n_batch = if n_gpu_layers > 0 { 128 } else { 512 };
     (ui_friendly_threads, n_batch)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn eval_multimodal_prompt<'a>(
-    backend: &LlamaBackend,
-    model: &'a LlamaModel,
-    mmproj_path: &str,
-    image_paths: &[&str],
-    prompt: String,
-    params: &InferenceParams,
-    ui_friendly_threads: i32,
-    n_batch: usize,
-) -> Result<(LlamaContext<'a>, i32, u32, u32)> {
-    let mtmd_params_gpu = MtmdContextParams {
-        use_gpu: params.n_gpu_layers > 0,
-        n_threads: ui_friendly_threads,
-        ..MtmdContextParams::default()
-    };
-    let mut mtmd_ctx = MtmdContext::init_from_file(mmproj_path, model, &mtmd_params_gpu)
-        .or_else(|_| {
-            let mtmd_params_cpu = MtmdContextParams {
-                use_gpu: false,
-                n_threads: ui_friendly_threads,
-                ..MtmdContextParams::default()
-            };
-            MtmdContext::init_from_file(mmproj_path, model, &mtmd_params_cpu)
-        })
-        .map_err(|e| {
-            anyhow!(
-                "Failed to load vision projector ({mmproj_path}): {e}. Ensure it matches this model in Settings → Models."
-            )
-        })?;
-
-    let mut bitmaps = Vec::with_capacity(image_paths.len());
-    for img_path in image_paths {
-        let bmp = MtmdBitmap::from_file(&mtmd_ctx, img_path, false)
-            .map_err(|e| anyhow!("Failed to decode image {img_path}: {e}"))?;
-        bitmaps.push(bmp);
-    }
-    let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
-
-    let chunks = mtmd_ctx
-        .tokenize(
-            MtmdInputText {
-                text: prompt,
-                add_special: true,
-                parse_special: true,
-            },
-            &bitmap_refs,
-        )
-        .map_err(|e| anyhow!("Multimodal tokenization failed: {e}"))?;
-
-    let estimated_tokens = (chunks.total_tokens() as u32) + 512;
-    let ctx_size = params.n_ctx.max(estimated_tokens);
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(ctx_size))
-        .with_n_threads(ui_friendly_threads)
-        .with_n_threads_batch(ui_friendly_threads);
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .context("Failed to create llama.cpp context")?;
-
-    let new_pos = chunks
-        .eval_chunks(&mut mtmd_ctx, &mut ctx, 0, 0, n_batch as i32, true)
-        .map_err(|e| anyhow!("Vision prompt evaluation failed: {e}"))?;
-    Ok((ctx, new_pos, new_pos.max(0) as u32, ctx_size))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn eval_text_prompt<'a>(
-    backend: &LlamaBackend,
-    model: &'a LlamaModel,
-    prompt: &str,
-    params: &InferenceParams,
-    ui_friendly_threads: i32,
-    n_batch: usize,
-    batch: &mut LlamaBatch,
-    cancel_flag: &AtomicBool,
-) -> Result<Option<(LlamaContext<'a>, i32, u32, u32)>> {
-    let tokens = model.vocab().tokenize(prompt.as_bytes(), true, true);
-    let ctx_size = params.n_ctx.max((tokens.len() as u32) + 256);
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(ctx_size))
-        .with_n_threads(ui_friendly_threads)
-        .with_n_threads_batch(ui_friendly_threads);
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .context("Failed to create llama.cpp context")?;
-
-    let mut pos = 0i32;
-    for chunk in tokens.chunks(n_batch) {
-        if cancel_flag.load(Ordering::Relaxed) {
-            return Ok(None);
-        }
-        batch.clear();
-        for (idx, &tok) in chunk.iter().enumerate() {
-            let is_last_overall = (pos as usize + idx + 1) == tokens.len();
-            batch.add(tok, pos + idx as i32, &[0], is_last_overall)?;
-        }
-        ctx.decode(batch).context("Prompt decode failed")?;
-        pos += chunk.len() as i32;
-        yield_for_ui(params.n_gpu_layers);
-    }
-    Ok(Some((ctx, pos, tokens.len() as u32, ctx_size)))
 }
 
 fn build_sampler(temperature: f32) -> LlamaSampler {
@@ -247,88 +327,6 @@ fn build_sampler(temperature: f32) -> LlamaSampler {
             LlamaSampler::dist(seed),
         ])
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_decode_loop(
-    model: &LlamaModel,
-    ctx: &mut LlamaContext<'_>,
-    batch: &mut LlamaBatch,
-    mut pos: i32,
-    ctx_size: u32,
-    params: &InferenceParams,
-    initial_close_tag: Option<&'static str>,
-    cancel_flag: &AtomicBool,
-    tx: &mpsc::UnboundedSender<ChatEvent>,
-) -> Result<(StopReason, u32, u64)> {
-    let vocab = model.vocab();
-    let mut sampler = build_sampler(params.temperature);
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
-    let mut think_parser = match initial_close_tag {
-        Some(tag) => ThinkStreamParser::starting_in_think(tag),
-        None => ThinkStreamParser::new(),
-    };
-    let mut stop_filter = StopSequenceFilter::new();
-    let mut completion_tokens = 0u32;
-    let gen_start = std::time::Instant::now();
-    let mut stop_reason = StopReason::MaxTokens;
-
-    for _ in 0..params.max_tokens {
-        if cancel_flag.load(Ordering::Relaxed) {
-            stop_reason = StopReason::Cancelled;
-            break;
-        }
-
-        let token = sampler.sample(ctx, -1);
-        sampler.accept(token);
-        if vocab.is_eog(token) {
-            stop_reason = StopReason::Natural;
-            break;
-        }
-        completion_tokens += 1;
-
-        let output_bytes = vocab.token_to_piece(token, true, None);
-        let mut piece = String::with_capacity(output_bytes.len());
-        let _ = decoder.decode_to_string(&output_bytes, &mut piece, false);
-
-        match stop_filter.push(&piece) {
-            StopOutput::Emit(safe) if !safe.is_empty() => {
-                emit_parsed(&think_parser.push(&safe), tx);
-            }
-            StopOutput::Emit(_) => {}
-            StopOutput::Stopped { emit } => {
-                if !emit.is_empty() {
-                    emit_parsed(&think_parser.push(&emit), tx);
-                }
-                stop_reason = StopReason::Natural;
-                break;
-            }
-        }
-
-        // Stop cleanly if the KV cache has reached `ctx_size` instead of failing in `ctx.decode`.
-        if pos >= ctx_size as i32 {
-            stop_reason = StopReason::ContextLimit;
-            break;
-        }
-
-        batch.clear();
-        batch.add(token, pos, &[0], true)?;
-        pos += 1;
-        ctx.decode(batch).context("Token decode failed")?;
-        yield_for_ui(params.n_gpu_layers);
-    }
-
-    let remaining = stop_filter.finish();
-    if !remaining.is_empty() {
-        emit_parsed(&think_parser.push(&remaining), tx);
-    }
-    emit_parsed(&think_parser.finish(), tx);
-
-    Ok((
-        stop_reason,
-        completion_tokens,
-        gen_start.elapsed().as_millis() as u64,
-    ))
 }
 
 /// Leave a brief GPU/CPU scheduling window between token decodes so GSK rendering

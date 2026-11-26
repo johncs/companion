@@ -225,9 +225,15 @@ fn build_conversation_menu_button(
             );
             let sender = sender.clone();
             let conv_id = conv_id.clone();
-            present_destructive_confirm(&row_ref, &gettext("Delete Chat?"), &body, &gettext("Delete"), move || {
-                sender.input(SidebarMsg::DeleteConversation(conv_id.clone()));
-            });
+            present_destructive_confirm(
+                &row_ref,
+                &gettext("Delete Chat?"),
+                &body,
+                &gettext("Delete"),
+                move || {
+                    sender.input(SidebarMsg::DeleteConversation(conv_id.clone()));
+                },
+            );
         });
     }
 
@@ -253,10 +259,7 @@ fn wrap_more_menu(tooltip: &str, popover: &gtk::Popover, content: &gtk::Box) -> 
 }
 
 fn build_popover_item(label: &str) -> gtk::Button {
-    let lbl = gtk::Label::builder()
-        .label(label)
-        .xalign(0.0)
-        .build();
+    let lbl = gtk::Label::builder().label(label).xalign(0.0).build();
     let btn = gtk::Button::builder()
         .child(&lbl)
         .css_classes(["flat"])

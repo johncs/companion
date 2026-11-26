@@ -26,7 +26,8 @@ impl Database {
                     total_bytes: total.and_then(|v| u64::try_from(v).ok()),
                 })
             })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
         })
     }
 

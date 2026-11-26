@@ -13,7 +13,6 @@ use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
 use tokio::sync::mpsc;
 
-use companion_core::runtime;
 use companion_core::provider::{ChatEvent, ChatTurn, InferenceParams, ModelProvider};
 
 use runner::run_inference_blocking;
@@ -45,15 +44,20 @@ struct LoadedModel {
 
 /// Embedded `llama.cpp` provider that caches the active loaded GGUF in memory.
 /// Serializes inference turns with an async lock so multiple chats can share one loaded model safely.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LlamaCppProvider {
+    handle: tokio::runtime::Handle,
     loaded: Arc<Mutex<Option<LoadedModel>>>,
     inference_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LlamaCppProvider {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            handle,
+            loaded: Arc::new(Mutex::new(None)),
+            inference_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// Unload any currently cached model weights from RAM/VRAM.
@@ -89,7 +93,9 @@ impl LlamaCppProvider {
             return Err(anyhow!("Model file not found: {model_path}"));
         }
 
-        let _ = tx.send(ChatEvent::Status(companion_core::i18n::gettext("Loading model…")));
+        let _ = tx.send(ChatEvent::Status(companion_core::i18n::gettext(
+            "Loading model…",
+        )));
         let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
         let model = LlamaModel::load_from_file(backend, model_path, &model_params)
             .with_context(|| format!("Failed to load GGUF model {model_path}"))?;
@@ -120,7 +126,7 @@ impl ModelProvider for LlamaCppProvider {
     ) -> Result<()> {
         let provider = self.clone();
 
-        runtime().spawn(async move {
+        self.handle.spawn(async move {
             let _turn_guard = match provider.inference_lock.try_lock() {
                 Ok(guard) => guard,
                 Err(_) => {

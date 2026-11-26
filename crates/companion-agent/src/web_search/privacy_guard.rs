@@ -29,9 +29,7 @@ pub fn inspect_search_query(query: &str, local_texts: &[String]) -> Vec<String> 
         ));
     }
     if contains_local_path(trimmed) {
-        warnings.push(gettext(
-            "Query appears to contain a local file path.",
-        ));
+        warnings.push(gettext("Query appears to contain a local file path."));
     }
     if contains_secret_or_email(trimmed) {
         warnings.push(gettext(
@@ -194,10 +192,10 @@ mod tests {
 
     #[test]
     fn inspect_query_flags_local_overlap_paths_and_secrets() {
-        let local_docs = vec![
-            "Confidential project roadmap for Aetherial Exorover launch in Q4.".to_string(),
-        ];
-        let leak = inspect_search_query("project roadmap for Aetherial Exorover launch", &local_docs);
+        let local_docs =
+            vec!["Confidential project roadmap for Aetherial Exorover launch in Q4.".to_string()];
+        let leak =
+            inspect_search_query("project roadmap for Aetherial Exorover launch", &local_docs);
         assert!(leak.iter().any(|w| w.contains("local file or attachment")));
 
         let path_warn = inspect_search_query("read /var/home/user/secret.txt", &[]);
@@ -225,14 +223,22 @@ mod tests {
     fn inspect_fetch_url_detects_encoded_leaks_and_invalid_urls() {
         let secret_url = "https://example.com/search?q=sk-1234567890";
         let secret_warnings = inspect_fetch_url(secret_url, &[]);
-        assert!(secret_warnings.iter().any(|w| w.contains("API key, or token")));
+        assert!(
+            secret_warnings
+                .iter()
+                .any(|w| w.contains("API key, or token"))
+        );
 
         let path_url = "https://example.com/lookup?path=%2Fhome%2Falice%2Fnotes.txt";
         let path_warnings = inspect_fetch_url(path_url, &[]);
         assert!(path_warnings.iter().any(|w| w.contains("local file path")));
 
         let bad_warnings = inspect_fetch_url("not a valid url", &[]);
-        assert!(bad_warnings.iter().any(|w| w.contains("could not be parsed")));
+        assert!(
+            bad_warnings
+                .iter()
+                .any(|w| w.contains("could not be parsed"))
+        );
     }
 
     #[test]
