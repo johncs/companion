@@ -1,8 +1,13 @@
 //! Chat Agent core: sandboxed folder/file tools, permission engine, and tool-call parser.
 
+pub mod approval;
+pub mod coalescer;
 pub mod parser;
+pub mod path_mentions;
 pub mod permissions;
+pub mod prompt;
 pub mod registry;
+pub mod runner;
 pub mod tool;
 pub mod tools;
 pub mod web_search;

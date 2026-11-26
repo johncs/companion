@@ -1,6 +1,7 @@
 data/io.github.companion.Companion.desktop.in
 data/io.github.companion.Companion.metainfo.xml.in
 src/agent/mod.rs
+src/agent/runner.rs
 src/agent/web_search/mod.rs
 src/agent/web_search/privacy_guard.rs
 src/core/attachments.rs
@@ -15,7 +16,6 @@ src/ui/chat_controls_dialog.rs
 src/ui/chat_view/agent_runner.rs
 src/ui/chat_view/message_actions.rs
 src/ui/chat_view/mod.rs
-src/ui/chat_view/tool_runner.rs
 src/ui/composer/attachments.rs
 src/ui/composer/input_helpers.rs
 src/ui/composer/mod.rs

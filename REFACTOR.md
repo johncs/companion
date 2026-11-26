@@ -243,7 +243,7 @@ Currently, adding or modifying a tool requires editing 6 different `match tool_n
 **Goal:** Move the entire multi-step agent orchestration, streaming coalescer, and prompt assembly out of GTK/Relm4 into a pure, reusable, unit-testable `src/agent/runner.rs`, turning `src/ui/chat_view/` into a thin presentation layer.
 
 ### 4.1 Build Pure `AgentRunner` (`src/agent/runner.rs` + `src/agent/prompt.rs`)
-- [ ] **Extract pure prompt assembly (`src/agent/prompt.rs`):**
+- [x] **Extract pure prompt assembly (`src/agent/prompt.rs`):**
   - Move `build_prompt_turns` out of `src/ui/chat_view/prompt_builder.rs` and `path_mentions.rs` into `src/agent/prompt.rs` and `src/agent/path_mentions.rs`.
   - Signature takes pure domain data:
     ```rust
@@ -257,14 +257,14 @@ Currently, adding or modifying a tool requires editing 6 different `match tool_n
     pub fn build_prompt_turns(ctx: &PromptContext<'_>) -> Vec<ChatTurn>
     ```
   - Zero GTK / `gio::ListStore` / `MessageObject` dependencies.
-- [ ] **Define `ApprovalHandler` trait (`src/agent/approval.rs`):**
+- [x] **Define `ApprovalHandler` trait (`src/agent/approval.rs`):**
   ```rust
   #[async_trait] // or manual BoxFuture to avoid extra proc-macro dep
   pub trait ApprovalHandler: Send + Sync {
       async fn request_approval(&self, req: ApprovalRequest) -> ApprovalResponse;
   }
   ```
-- [ ] **Build `AgentRunner` (`src/agent/runner.rs`):**
+- [x] **Build `AgentRunner` (`src/agent/runner.rs`):**
   - Owns the `for step in 0..MAX_AGENT_STEPS` loop currently living in `ui/chat_view/agent_runner.rs`.
   - Runs entirely on `core::runtime()` (never `glib::MainContext::spawn_local`).
   - Accepts `Arc<dyn ModelProvider>`, `ToolRegistry`, `PermissionEngine`, `Arc<dyn ApprovalHandler>`, `Database` (or a `ChatRepository` trait), and `CancellationFlag`.
@@ -279,27 +279,27 @@ Currently, adding or modifying a tool requires editing 6 different `match tool_n
     - `Finished { saved_message_id, total_tokens, elapsed_ms, empty }`
     - `TitleUpdated(String)`
   - Performs DB persistence (`insert_message`, `insert_tool_call`, `record_model_speed`, `maybe_generate_title`) on Tokio's blocking pool — never touching the GTK main thread.
-- [ ] **Move `spawn_stream_coalescer` out of `ui/chat_view/stream.rs` into `src/agent/coalescer.rs`:**
+- [x] **Move `spawn_stream_coalescer` out of `ui/chat_view/stream.rs` into `src/agent/coalescer.rs`:**
   - Already has zero GTK dependencies (once `ActiveChatRun` stays in UI); make its flush interval injectable for deterministic fast tests.
 
 ### 4.2 Slim Down `src/ui/chat_view/`
-- [ ] Implement `GtkApprovalHandler` in `src/ui/chat_view/approval.rs` bridging `ApprovalRequest` → `glib::MainContext::default().spawn_local` → `AdwAlertDialog` (`permission_dialog.rs`) → `oneshot::Sender<ApprovalResponse>`.
-- [ ] Reduce `ui/chat_view/agent_runner.rs` from **403 lines** to a thin ~80-line adapter that launches `AgentRunner` and applies incoming `AgentEvent`s to `MessageObject` / `ListStore` / `ComposerMsg`.
-- [ ] Delete `ui/chat_view/tool_runner.rs` (283 lines) and `ui/chat_view/prompt_builder.rs` (147 lines) — replaced by `src/agent/`.
-- [ ] Split `ChatViewModel::update` (`src/ui/chat_view/mod.rs`, currently **619 lines** total / **245-line** `update` method) into focused private handler methods (`on_load_conversation`, `on_page_loaded`, `on_refresh_models`, etc.) so `chat_view/mod.rs` is `<= 350` lines.
-- [ ] Replace duplicated `std::thread::scope` chunking in `src/ui/chat_view/page_loader.rs:89-118` with `crate::core::parallel_chunks`.
+- [x] Implement `GtkApprovalHandler` in `src/ui/chat_view/approval.rs` bridging `ApprovalRequest` → `glib::MainContext::default().spawn_local` → `AdwAlertDialog` (`permission_dialog.rs`) → `oneshot::Sender<ApprovalResponse>`.
+- [x] Reduce `ui/chat_view/agent_runner.rs` from **403 lines** to a thin ~80-line adapter that launches `AgentRunner` and applies incoming `AgentEvent`s to `MessageObject` / `ListStore` / `ComposerMsg`.
+- [x] Delete `ui/chat_view/tool_runner.rs` (283 lines) and `ui/chat_view/prompt_builder.rs` (147 lines) — replaced by `src/agent/`.
+- [x] Split `ChatViewModel::update` (`src/ui/chat_view/mod.rs`, currently **619 lines** total / **245-line** `update` method) into focused private handler methods (`on_load_conversation`, `on_page_loaded`, `on_refresh_models`, etc.) so `chat_view/mod.rs` is `<= 350` lines.
+- [x] Replace duplicated `std::thread::scope` chunking in `src/ui/chat_view/page_loader.rs:89-118` with `crate::core::parallel_chunks`.
 
 ### 4.3 Tests & Verification
-- [ ] Implement `MockModelProvider` (scripted multi-step `ChatEvent` sequences) and `MockApprovalHandler` (scripted allow/deny/edited-query responses) in `src/agent/runner.rs` `#[cfg(test)]`.
-- [ ] Add end-to-end headless unit tests for `AgentRunner`:
+- [x] Implement `MockModelProvider` (scripted multi-step `ChatEvent` sequences) and `MockApprovalHandler` (scripted allow/deny/edited-query responses) in `src/agent/runner.rs` `#[cfg(test)]`.
+- [x] Add end-to-end headless unit tests for `AgentRunner`:
   - Single-turn streaming response + reasoning + usage persistence.
   - Multi-step tool-call loop (model emits `<tool_call>` → tool executes → `<tool_result>` fed back → final answer saved).
   - User denies tool call → `"User denied permission."` fed back cleanly, tool not executed.
   - Cancellation mid-stream removes/skips empty output and stops cleanly without persisting partial junk.
   - `MAX_AGENT_STEPS` cap stops infinite tool loops gracefully.
   - Web search privacy warnings forwarded to `ApprovalHandler`, and user-edited query is what executes.
-- [ ] Add unit tests for `build_prompt_turns` (granted folders, empty folders, web search toggle, image vs. text attachments, mentioned OS paths).
-- [ ] **Verification:** All files in `src/ui/chat_view/` are `<= 350` lines; `AgentRunner` has full headless test coverage; `cargo test` passes.
+- [x] Add unit tests for `build_prompt_turns` (granted folders, empty folders, web search toggle, image vs. text attachments, mentioned OS paths).
+- [x] **Verification:** All files in `src/ui/chat_view/` are `<= 350` lines; `AgentRunner` has full headless test coverage; `cargo test` passes.
 
 ---
 
@@ -410,6 +410,6 @@ Eliminate `Rc<RefCell<Option<Rc<dyn Fn()>>>>` callback slots and 8–12 paramete
 | **Sprint 1** | Pure Domain Types & Zero-GTK Core | `[x]` Done | Zero `glib` in domain layers; typed `ModelParams` & enums |
 | **Sprint 2** | Storage Hardening & Responsibility Split | `[x]` Done | Atomic migrations, zero DB `.expect()`, pure SQL repos |
 | **Sprint 3** | `ToolRegistry` & Security Fixes | `[x]` Done | Extensible tool system; SSRF & write-escalation bugs fixed |
-| **Sprint 4** | Extract `AgentRunner` from `chat_view` | `[ ]` Planned | Full headless agent loop tests; thin Relm4 chat renderer |
+| **Sprint 4** | Extract `AgentRunner` from `chat_view` | `[x]` Done | Full headless agent loop tests; thin Relm4 chat renderer |
 | **Sprint 5** | `DownloadManager` & UI Cleanup | `[ ]` Planned | Zero `too_many_arguments`; injectable downloads; all UI files `<= 400` LOC |
 | **Sprint 6** | Parsers/Inference, Workspace & CI Gates | `[ ]` Planned | Compiler-enforced crate DAG; headless `cargo test`; lint gates |

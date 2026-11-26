@@ -48,6 +48,7 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
+    #[cfg(test)]
     pub fn risk_of(&self, name: &str) -> Option<ToolRisk> {
         self.tools.get(name).map(|t| t.risk())
     }
@@ -195,7 +196,6 @@ mod tests {
             web_search_enabled: false,
             search_engine: SearchEngine::DuckDuckGo,
             searxng_url: None,
-            local_texts: &[],
         };
         let ws_err = rt
             .block_on(

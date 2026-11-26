@@ -16,8 +16,8 @@ use crate::ui::composer::ComposerMsg;
 use crate::ui::message_object::MessageObject;
 use crate::ui::permission_dialog::{FolderDropGrantChoice, present_folder_drop_confirm_dialog};
 
+use super::agent_runner::ActiveChatRun;
 use super::page_loader::{load_and_parse_page, scroll_scroller_to_bottom};
-use super::stream::ActiveChatRun;
 use super::{ChatViewModel, ChatViewMsg, ChatViewOutput};
 
 impl ChatViewModel {

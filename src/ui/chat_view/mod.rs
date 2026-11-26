@@ -1,12 +1,9 @@
 //! Virtualized chat stream (`gtk::ListView`) with paginated SQLite loading, composer, and `llama.cpp` streaming.
 
 mod agent_runner;
+mod approval;
 mod message_actions;
 mod page_loader;
-mod path_mentions;
-mod prompt_builder;
-mod stream;
-mod tool_runner;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -30,7 +27,7 @@ use crate::ui::message_row::build_message_list_factory;
 pub use page_loader::LoadedPageData;
 
 use page_loader::load_and_parse_page;
-use stream::ActiveChatRun;
+use agent_runner::ActiveChatRun;
 
 #[derive(Debug)]
 pub enum ChatViewMsg {
@@ -327,100 +324,13 @@ impl SimpleComponent for ChatViewModel {
             ChatViewMsg::LoadConversation {
                 conversation_id,
                 title,
-            } => {
-                self.load_seq = self.load_seq.wrapping_add(1);
-                let req_seq = self.load_seq;
-                self.active_conversation_id = Some(conversation_id.clone());
-                *self.visible_conv_id.borrow_mut() = Some(conversation_id.clone());
-                let is_running = self.active_runs.borrow().contains_key(&conversation_id);
-                self.composer.emit(ComposerMsg::SetGenerating(is_running));
-                self.active_title = title;
-                self.store.remove_all();
-                self.oldest_loaded_ts = None;
-                self.has_more_pages = false;
-                self.is_loading_older = false;
-                self.is_loading = true;
-                self.is_empty = false;
-
-                let db = self.db.clone();
-                let conv_id = conversation_id;
-                let input_sender = sender.input_sender().clone();
-
-                runtime().spawn_blocking(move || {
-                    let result = load_and_parse_page(&db, &conv_id, None, 0);
-                    let _ = input_sender.send(ChatViewMsg::ConversationPageLoaded {
-                        conversation_id: conv_id,
-                        request_seq: req_seq,
-                        result,
-                    });
-                });
-            }
+            } => self.on_load_conversation(conversation_id, title, &sender),
             ChatViewMsg::ConversationPageLoaded {
                 conversation_id,
                 request_seq,
                 result,
-            } => {
-                if self.load_seq != request_seq
-                    || self.active_conversation_id.as_deref() != Some(conversation_id.as_str())
-                {
-                    return;
-                }
-                self.is_loading = false;
-                match result {
-                    Ok(data) => {
-                        if let Some(loaded_conv) = data.conversation {
-                            self.active_system_prompt = loaded_conv
-                                .system_prompt
-                                .unwrap_or_else(|| default_system_prompt().to_string());
-                            self.active_thinking_level = loaded_conv.thinking_level;
-                            self.web_search_enabled = loaded_conv.web_search_enabled;
-                            self.composer.emit(ComposerMsg::SetSystemPrompt(
-                                self.active_system_prompt.clone(),
-                            ));
-                            self.composer
-                                .emit(ComposerMsg::SetThinkingLevel(self.active_thinking_level));
-                            self.composer
-                                .emit(ComposerMsg::SetWebSearchEnabled(self.web_search_enabled));
-                        }
-                        if let Some(granted) = data.granted_folders {
-                            self.composer.emit(ComposerMsg::SetGrantedFolders(granted));
-                        }
-                        self.has_more_pages = data.has_more_pages;
-                        self.oldest_loaded_ts = data.oldest_loaded_ts;
-                        let objs: Vec<MessageObject> = data
-                            .items
-                            .into_iter()
-                            .map(|(m, atts, tcs, blocks)| {
-                                MessageObject::from_message_with_blocks(&m, atts, tcs, blocks)
-                            })
-                            .collect();
-                        self.store.splice(0, self.store.n_items(), &objs);
-                        if let Some(run) = self.active_runs.borrow().get(&conversation_id) {
-                            self.store.append(&run.stream_obj);
-                        }
-                        self.composer.emit(ComposerMsg::SetContextUsed(data.est_tokens));
-                        self.is_empty = self.store.n_items() == 0;
-                        self.scroll_to_bottom();
-                    }
-                    Err(err) => {
-                        self.is_empty = true;
-                        let _ = sender.output(ChatViewOutput::ShowToast(tr_f(
-                            "Failed to load messages: {err}",
-                            &[("err", &err)],
-                        )));
-                    }
-                }
-            }
-            ChatViewMsg::ClearConversation => {
-                self.cancel_active_stream(&sender);
-                self.active_conversation_id = None;
-                *self.visible_conv_id.borrow_mut() = None;
-                self.store.remove_all();
-                self.is_loading = false;
-                self.is_empty = true;
-                self.web_search_enabled = false;
-                self.composer.emit(ComposerMsg::SetWebSearchEnabled(false));
-            }
+            } => self.on_page_loaded(conversation_id, request_seq, result, &sender),
+            ChatViewMsg::ClearConversation => self.on_clear_conversation(&sender),
             ChatViewMsg::CancelConversation(id) => {
                 self.cancel_run_for(&id, &sender);
                 if self.active_conversation_id.as_deref() == Some(id.as_str()) {
@@ -432,45 +342,8 @@ impl SimpleComponent for ChatViewModel {
                 conversation_id,
                 request_seq,
                 result,
-            } => {
-                if self.load_seq != request_seq
-                    || self.active_conversation_id.as_deref() != Some(conversation_id.as_str())
-                {
-                    return;
-                }
-                self.is_loading = false;
-                self.is_loading_older = false;
-                if let Ok(data) = result {
-                    if data.items.is_empty() {
-                        self.has_more_pages = false;
-                        return;
-                    }
-                    self.has_more_pages = data.has_more_pages;
-                    self.oldest_loaded_ts = data.oldest_loaded_ts;
-                    let objects: Vec<MessageObject> = data
-                        .items
-                        .into_iter()
-                        .map(|(m, atts, tcs, blocks)| {
-                            MessageObject::from_message_with_blocks(&m, atts, tcs, blocks)
-                        })
-                        .collect();
-                    self.store.splice(0, 0, &objects);
-                }
-            }
-            ChatViewMsg::OpenFolderPermissions => {
-                let Some(conv_id) = self.active_conversation_id.clone() else {
-                    return;
-                };
-                let sender_clone = sender.clone();
-                crate::ui::folder_permissions_dialog::present_folder_permissions_dialog(
-                    &self.scrolled_window,
-                    self.db.clone(),
-                    conv_id,
-                    move || {
-                        sender_clone.input(ChatViewMsg::RefreshGrantedFolders);
-                    },
-                );
-            }
+            } => self.on_older_page_loaded(conversation_id, request_seq, result),
+            ChatViewMsg::OpenFolderPermissions => self.on_open_folder_permissions(&sender),
             ChatViewMsg::GrantFolder(path) => self.handle_grant_folder(path, &sender),
             ChatViewMsg::RefreshGrantedFolders => {
                 if let Some(conv_id) = &self.active_conversation_id {
@@ -500,9 +373,7 @@ impl SimpleComponent for ChatViewModel {
             ChatViewMsg::ThinkingLevelChanged(level) => {
                 self.active_thinking_level = level;
                 if let Some(conv_id) = &self.active_conversation_id {
-                    let _ = self
-                        .db
-                        .set_conversation_thinking_level(conv_id, level);
+                    let _ = self.db.set_conversation_thinking_level(conv_id, level);
                 }
             }
             ChatViewMsg::WebSearchToggled(enabled) => {
@@ -517,32 +388,11 @@ impl SimpleComponent for ChatViewModel {
                 self.composer
                     .emit(ComposerMsg::SetWebSearchGlobalEnabled(enabled));
             }
-            ChatViewMsg::RefreshModels(id) => {
-                let model_changed = self.active_model_id != id;
-                self.active_model_id = id.clone();
-                if model_changed && !self.active_runs.borrow().is_empty() {
-                    self.cancel_all_runs(&sender);
-                    self.provider.unload();
-                    let _ = sender.output(ChatViewOutput::ShowToast(gettext(
-                        "Stopped active chats to switch AI model",
-                    )));
-                }
-                self.composer.emit(ComposerMsg::RefreshModels(id));
-            }
+            ChatViewMsg::RefreshModels(id) => self.on_refresh_models(id, &sender),
             ChatViewMsg::PersonalizationChanged {
                 assistant_name,
                 user_name,
-            } => {
-                self.composer
-                    .emit(ComposerMsg::SetAssistantName(assistant_name.clone()));
-                *self.assistant_name.borrow_mut() = assistant_name;
-                *self.user_name.borrow_mut() = user_name;
-                for idx in 0..self.store.n_items() {
-                    if let Some(obj) = self.store.item(idx).and_downcast::<MessageObject>() {
-                        obj.emit_updated();
-                    }
-                }
-            }
+            } => self.on_personalization_changed(assistant_name, user_name),
             ChatViewMsg::ConversationTitleUpdated { id, title } => {
                 if self.active_conversation_id.as_deref() == Some(&id) {
                     self.active_title = title;
@@ -553,6 +403,185 @@ impl SimpleComponent for ChatViewModel {
             }
             ChatViewMsg::ShowToast(msg) => {
                 let _ = sender.output(ChatViewOutput::ShowToast(msg));
+            }
+        }
+    }
+}
+
+impl ChatViewModel {
+    fn on_load_conversation(
+        &mut self,
+        conversation_id: String,
+        title: String,
+        sender: &ComponentSender<Self>,
+    ) {
+        self.load_seq = self.load_seq.wrapping_add(1);
+        let req_seq = self.load_seq;
+        self.active_conversation_id = Some(conversation_id.clone());
+        *self.visible_conv_id.borrow_mut() = Some(conversation_id.clone());
+        let is_running = self.active_runs.borrow().contains_key(&conversation_id);
+        self.composer.emit(ComposerMsg::SetGenerating(is_running));
+        self.active_title = title;
+        self.store.remove_all();
+        self.oldest_loaded_ts = None;
+        self.has_more_pages = false;
+        self.is_loading_older = false;
+        self.is_loading = true;
+        self.is_empty = false;
+
+        let db = self.db.clone();
+        let input_sender = sender.input_sender().clone();
+        runtime().spawn_blocking(move || {
+            let result = load_and_parse_page(&db, &conversation_id, None, 0);
+            let _ = input_sender.send(ChatViewMsg::ConversationPageLoaded {
+                conversation_id,
+                request_seq: req_seq,
+                result,
+            });
+        });
+    }
+
+    fn on_page_loaded(
+        &mut self,
+        conversation_id: String,
+        request_seq: u64,
+        result: Result<LoadedPageData, String>,
+        sender: &ComponentSender<Self>,
+    ) {
+        if self.load_seq != request_seq
+            || self.active_conversation_id.as_deref() != Some(conversation_id.as_str())
+        {
+            return;
+        }
+        self.is_loading = false;
+        match result {
+            Ok(data) => {
+                if let Some(loaded_conv) = data.conversation {
+                    self.active_system_prompt = loaded_conv
+                        .system_prompt
+                        .unwrap_or_else(|| default_system_prompt().to_string());
+                    self.active_thinking_level = loaded_conv.thinking_level;
+                    self.web_search_enabled = loaded_conv.web_search_enabled;
+                    self.composer.emit(ComposerMsg::SetSystemPrompt(
+                        self.active_system_prompt.clone(),
+                    ));
+                    self.composer
+                        .emit(ComposerMsg::SetThinkingLevel(self.active_thinking_level));
+                    self.composer
+                        .emit(ComposerMsg::SetWebSearchEnabled(self.web_search_enabled));
+                }
+                if let Some(granted) = data.granted_folders {
+                    self.composer.emit(ComposerMsg::SetGrantedFolders(granted));
+                }
+                self.has_more_pages = data.has_more_pages;
+                self.oldest_loaded_ts = data.oldest_loaded_ts;
+                let objs: Vec<MessageObject> = data
+                    .items
+                    .into_iter()
+                    .map(|(m, atts, tcs, blocks)| {
+                        MessageObject::from_message_with_blocks(&m, atts, tcs, blocks)
+                    })
+                    .collect();
+                self.store.splice(0, self.store.n_items(), &objs);
+                if let Some(run) = self.active_runs.borrow().get(&conversation_id) {
+                    self.store.append(&run.stream_obj);
+                }
+                self.composer.emit(ComposerMsg::SetContextUsed(data.est_tokens));
+                self.is_empty = self.store.n_items() == 0;
+                self.scroll_to_bottom();
+            }
+            Err(err) => {
+                self.is_empty = true;
+                let _ = sender.output(ChatViewOutput::ShowToast(tr_f(
+                    "Failed to load messages: {err}",
+                    &[("err", &err)],
+                )));
+            }
+        }
+    }
+
+    fn on_clear_conversation(&mut self, sender: &ComponentSender<Self>) {
+        self.cancel_active_stream(sender);
+        self.active_conversation_id = None;
+        *self.visible_conv_id.borrow_mut() = None;
+        self.store.remove_all();
+        self.is_loading = false;
+        self.is_empty = true;
+        self.web_search_enabled = false;
+        self.composer.emit(ComposerMsg::SetWebSearchEnabled(false));
+    }
+
+    fn on_older_page_loaded(
+        &mut self,
+        conversation_id: String,
+        request_seq: u64,
+        result: Result<LoadedPageData, String>,
+    ) {
+        if self.load_seq != request_seq
+            || self.active_conversation_id.as_deref() != Some(conversation_id.as_str())
+        {
+            return;
+        }
+        self.is_loading = false;
+        self.is_loading_older = false;
+        if let Ok(data) = result {
+            if data.items.is_empty() {
+                self.has_more_pages = false;
+                return;
+            }
+            self.has_more_pages = data.has_more_pages;
+            self.oldest_loaded_ts = data.oldest_loaded_ts;
+            let objects: Vec<MessageObject> = data
+                .items
+                .into_iter()
+                .map(|(m, atts, tcs, blocks)| {
+                    MessageObject::from_message_with_blocks(&m, atts, tcs, blocks)
+                })
+                .collect();
+            self.store.splice(0, 0, &objects);
+        }
+    }
+
+    fn on_open_folder_permissions(&self, sender: &ComponentSender<Self>) {
+        let Some(conv_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        let sender_clone = sender.clone();
+        crate::ui::folder_permissions_dialog::present_folder_permissions_dialog(
+            &self.scrolled_window,
+            self.db.clone(),
+            conv_id,
+            move || {
+                sender_clone.input(ChatViewMsg::RefreshGrantedFolders);
+            },
+        );
+    }
+
+    fn on_refresh_models(&mut self, id: Option<String>, sender: &ComponentSender<Self>) {
+        let model_changed = self.active_model_id != id;
+        self.active_model_id = id.clone();
+        if model_changed && !self.active_runs.borrow().is_empty() {
+            self.cancel_all_runs(sender);
+            self.provider.unload();
+            let _ = sender.output(ChatViewOutput::ShowToast(gettext(
+                "Stopped active chats to switch AI model",
+            )));
+        }
+        self.composer.emit(ComposerMsg::RefreshModels(id));
+    }
+
+    fn on_personalization_changed(
+        &mut self,
+        assistant_name: String,
+        user_name: Option<String>,
+    ) {
+        self.composer
+            .emit(ComposerMsg::SetAssistantName(assistant_name.clone()));
+        *self.assistant_name.borrow_mut() = assistant_name;
+        *self.user_name.borrow_mut() = user_name;
+        for idx in 0..self.store.n_items() {
+            if let Some(obj) = self.store.item(idx).and_downcast::<MessageObject>() {
+                obj.emit_updated();
             }
         }
     }

@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-pub(super) fn extract_mentioned_os_paths(text: &str) -> Vec<PathBuf> {
+/// Extract existing `@/abs/path` mentions from user text.
+pub fn extract_mentioned_os_paths(text: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for token in text.split_whitespace() {
         let Some(raw) = token.strip_prefix('@') else {
@@ -25,7 +26,7 @@ pub(super) fn extract_mentioned_os_paths(text: &str) -> Vec<PathBuf> {
 
 /// Detect existing absolute OS paths (including ones containing spaces) in free-form user text.
 /// Used only as a system-prompt hint so the model passes the exact path; never auto-grants access.
-pub(super) fn detect_existing_os_paths_in_text(text: &str) -> Vec<PathBuf> {
+pub fn detect_existing_os_paths_in_text(text: &str) -> Vec<PathBuf> {
     const MAX_STAT_CHECKS: usize = 32;
     let mut out = Vec::new();
     let mut stat_checks = 0usize;

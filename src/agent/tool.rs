@@ -32,18 +32,17 @@ pub struct ToolContext<'a> {
     pub web_search_enabled: bool,
     pub search_engine: SearchEngine,
     pub searxng_url: Option<&'a str>,
-    #[allow(dead_code)] // Wired in Sprint 4 AgentRunner
-    pub local_texts: &'a [String],
 }
 
 /// Structured user approval request emitted before executing sensitive tools.
-#[allow(dead_code)] // Wired in Sprint 4 AgentRunner
 #[derive(Debug, Clone)]
 pub enum ApprovalRequest {
     ToolAction {
         tool_name: String,
         preview: String,
+        #[allow(dead_code)]
         risk: ToolRisk,
+        #[allow(dead_code)]
         ungranted_path: Option<PathBuf>,
     },
     WebSearch {

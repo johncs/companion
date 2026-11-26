@@ -87,36 +87,24 @@ pub(super) fn load_and_parse_page(
     };
 
     // Parse assistant Markdown & syntect code blocks in parallel across CPU cores.
-    let worker_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(1, 8)
-        .min(messages.len().max(1));
-    let chunk_size = messages.len().div_ceil(worker_count).max(1);
-
-    let mut parsed_blocks: Vec<Vec<crate::core::markdown::MarkdownBlock>> =
-        vec![Vec::new(); messages.len()];
-
-    if !messages.is_empty() {
-        std::thread::scope(|s| {
-            for (msg_chunk, out_chunk) in messages
-                .chunks(chunk_size)
-                .zip(parsed_blocks.chunks_mut(chunk_size))
-            {
-                s.spawn(move || {
-                    for (m, slot) in msg_chunk.iter().zip(out_chunk.iter_mut()) {
-                        *slot = if m.role == crate::core::types::MessageRole::Assistant {
-                            crate::core::markdown::parse_markdown_blocks(&m.content)
-                        } else {
-                            vec![crate::core::markdown::MarkdownBlock::Text(
-                                glib::markup_escape_text(&m.content).to_string(),
-                            )]
-                        };
+    let parsed_blocks: Vec<Vec<crate::core::markdown::MarkdownBlock>> =
+        crate::core::parallel_chunks(&messages, 1, |chunk| {
+            chunk
+                .iter()
+                .map(|m| {
+                    if m.role == crate::core::types::MessageRole::Assistant {
+                        crate::core::markdown::parse_markdown_blocks(&m.content)
+                    } else {
+                        vec![crate::core::markdown::MarkdownBlock::Text(
+                            glib::markup_escape_text(&m.content).to_string(),
+                        )]
                     }
-                });
-            }
-        });
-    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
 
     let items = messages
         .into_iter()

@@ -7,7 +7,6 @@ use tokio::sync::mpsc;
 
 use crate::core::ThinkingLevel;
 use crate::i18n::gettext;
-use crate::inference::llama_cpp::LlamaCppProvider;
 use crate::inference::provider::{ChatEvent, ChatRole, ChatTurn, InferenceParams, ModelProvider};
 use crate::storage::Database;
 
@@ -15,7 +14,7 @@ use crate::storage::Database;
 /// Returns `Some(new_title)` when the conversation was renamed.
 pub async fn maybe_generate_title(
     db: &Database,
-    provider: &LlamaCppProvider,
+    provider: &dyn ModelProvider,
     model_path: &str,
     base_params: &InferenceParams,
     conv_id: &str,
