@@ -6,13 +6,11 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::core::markdown::escape_pango_markup;
-use crate::core::runtime;
+use crate::format::markdown::escape_pango_markup;
 use crate::i18n::{gettext, tr_f};
 use crate::models::format_bytes;
 use crate::models::huggingface::{
-    HfGgufFile, RECOMMENDED_STARTER_NAME, RECOMMENDED_STARTER_REPO, list_repo_gguf_files,
-    select_starter_gguf,
+    HfGgufFile, RECOMMENDED_STARTER_NAME, RECOMMENDED_STARTER_REPO, select_starter_gguf,
 };
 
 use super::HfBrowserContext;
@@ -39,12 +37,23 @@ pub fn build_starter_model_row(ctx: &HfBrowserContext) -> adw::ActionRow {
         .build();
 
     let resolved_starter: ResolvedStarter = Rc::new(RefCell::new(None));
-    spawn_starter_metadata_lookup(&row, &default_sub, &resolved_starter);
-
     let is_installed = is_starter_installed(&ctx.db);
     let is_downloading = ctx
         .tracker
         .is_repo_active(&ctx.download_manager, RECOMMENDED_STARTER_REPO);
+
+    let lookup_started = Rc::new(std::cell::Cell::new(false));
+    {
+        let services_map = ctx.services.clone();
+        let default_sub = default_sub.clone();
+        let resolved_starter = resolved_starter.clone();
+        row.connect_map(move |r| {
+            if !lookup_started.get() {
+                lookup_started.set(true);
+                spawn_starter_metadata_lookup(r, &services_map, &default_sub, &resolved_starter);
+            }
+        });
+    }
 
     let controls = DownloadControls::new();
     let installed_label = build_status_badge(&gettext("Installed"), is_installed);
@@ -60,6 +69,7 @@ pub fn build_starter_model_row(ctx: &HfBrowserContext) -> adw::ActionRow {
     let ui = StarterUi {
         controls: controls.clone(),
         installed_label: installed_label.clone(),
+        downloading_label: downloading_label.clone(),
     };
     wire_starter_download_button(&download_btn, ui, &resolved_starter, ctx);
 
@@ -72,12 +82,15 @@ pub fn build_starter_model_row(ctx: &HfBrowserContext) -> adw::ActionRow {
 
 fn spawn_starter_metadata_lookup(
     row: &adw::ActionRow,
+    services: &crate::services::AppServices,
     default_sub: &str,
     resolved_starter: &ResolvedStarter,
 ) {
     let (tx, rx) = tokio::sync::oneshot::channel::<Option<(HfGgufFile, Option<HfGgufFile>)>>();
-    runtime().spawn(async move {
-        let found = list_repo_gguf_files(RECOMMENDED_STARTER_REPO)
+    let hf_client = services.hf_client.clone();
+    services.rt_handle.spawn(async move {
+        let found = hf_client
+            .list_repo_gguf_files(RECOMMENDED_STARTER_REPO)
             .await
             .ok()
             .and_then(|files| select_starter_gguf(&files));
@@ -135,6 +148,7 @@ fn build_status_badge(label: &str, visible: bool) -> gtk::Label {
 struct StarterUi {
     controls: DownloadControls,
     installed_label: gtk::Label,
+    downloading_label: gtk::Label,
 }
 
 fn wire_starter_download_button(
@@ -152,34 +166,16 @@ fn wire_starter_download_button(
             return;
         }
 
-        btn.set_sensitive(false);
-        ui.controls.pct_label.set_text("");
-        ui.controls.pause_btn.set_visible(false);
-        ui.controls.cancel_btn.set_visible(false);
-        ui.controls.container.set_visible(true);
-        ui.controls.progress.pulse();
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        runtime().spawn(async move {
-            let res = list_repo_gguf_files(RECOMMENDED_STARTER_REPO)
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|files| {
-                    select_starter_gguf(&files)
-                        .ok_or_else(|| gettext("No starter AI model found in repository"))
-                });
-            let _ = tx.send(res);
-        });
-
-        let btn = btn.clone();
-        let ui = ui.clone();
-        let ctx = ctx.clone();
+        let pulsing = start_starter_pulse(&ui.controls);
+        let rx = spawn_starter_gguf_lookup(&ctx.services.hf_client, &ctx.services.rt_handle);
+        let (btn, ui, ctx) = (btn.clone(), ui.clone(), ctx.clone());
         glib::MainContext::default().spawn_local(async move {
             let res = rx.await;
+            pulsing.set(false);
             btn.set_sensitive(true);
             match res {
                 Ok(Ok((model_file, mmproj_file))) => {
-                    launch_starter_download(&btn, &ui, &ctx, model_file, mmproj_file);
+                    launch_starter_download(&btn, &ui, &ctx, model_file, mmproj_file)
                 }
                 Ok(Err(err)) => {
                     ui.controls.container.set_visible(false);
@@ -194,6 +190,46 @@ fn wire_starter_download_button(
     });
 }
 
+fn spawn_starter_gguf_lookup(
+    hf_client: &std::sync::Arc<crate::models::huggingface::HfClient>,
+    rt_handle: &tokio::runtime::Handle,
+) -> tokio::sync::oneshot::Receiver<Result<(HfGgufFile, Option<HfGgufFile>), String>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let hf_client = hf_client.clone();
+    rt_handle.spawn(async move {
+        let res = hf_client
+            .list_repo_gguf_files(RECOMMENDED_STARTER_REPO)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|files| {
+                select_starter_gguf(&files)
+                    .ok_or_else(|| gettext("No starter AI model found in repository"))
+            });
+        let _ = tx.send(res);
+    });
+    rx
+}
+
+fn start_starter_pulse(controls: &DownloadControls) -> Rc<std::cell::Cell<bool>> {
+    controls.pct_label.set_text("");
+    controls.pause_btn.set_visible(false);
+    controls.cancel_btn.set_visible(false);
+    controls.container.set_visible(true);
+    controls.progress.pulse();
+
+    let pulsing = Rc::new(std::cell::Cell::new(true));
+    let pulsing_timer = pulsing.clone();
+    let progress_timer = controls.progress.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        if !pulsing_timer.get() {
+            return glib::ControlFlow::Break;
+        }
+        progress_timer.pulse();
+        glib::ControlFlow::Continue
+    });
+    pulsing
+}
+
 fn launch_starter_download(
     btn: &gtk::Button,
     ui: &StarterUi,
@@ -205,8 +241,10 @@ fn launch_starter_download(
         let refresh_installed = ctx.refresh_installed.clone();
         let btn = btn.clone();
         let installed_label = ui.installed_label.clone();
+        let downloading_label = ui.downloading_label.clone();
         Rc::new(move || {
             btn.set_visible(false);
+            downloading_label.set_visible(false);
             installed_label.set_visible(true);
             refresh_installed();
         })

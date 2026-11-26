@@ -4,6 +4,7 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, Row, params};
 
 use companion_core::model_params::ModelParams;
+use companion_core::types::ModelProviderType;
 
 use super::Database;
 use super::entities::ModelRecord;
@@ -55,7 +56,7 @@ impl Database {
                 params![
                     model.id,
                     model.display_name,
-                    model.provider_type,
+                    model.provider_type.as_str(),
                     model.file_path,
                     model.mmproj_path,
                     model.hf_repo,
@@ -76,46 +77,43 @@ impl Database {
         })
     }
 
-    /// Record a measured token-generation speed (`tokens_per_sec`) and update the model's
-    /// capped running average (window up to 20 samples).
-    pub fn record_model_speed(&self, id: &str, tokens_per_sec: f64) -> Result<()> {
-        if !tokens_per_sec.is_finite() || tokens_per_sec <= 0.0 {
-            return Ok(());
-        }
+    /// Fetch the stored `(avg_tokens_per_sec, speed_sample_count)` for a model.
+    pub fn get_model_speed_stats(&self, id: &str) -> Result<Option<(Option<f64>, i64)>> {
         self.with_conn(|conn| {
-            let existing: Option<(Option<f64>, i64)> = conn
-                .query_row(
-                    "SELECT avg_tokens_per_sec, speed_sample_count FROM models WHERE id = ?1",
-                    params![id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
+            conn.prepare_cached(
+                "SELECT avg_tokens_per_sec, speed_sample_count FROM models WHERE id = ?1",
+            )?
+            .query_row(params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .map_err(Into::into)
+        })
+    }
 
-            let Some((prev_avg, prev_count)) = existing else {
-                return Ok(());
-            };
-            let new_count = prev_count.saturating_add(1);
-            let weight = new_count.min(20) as f64;
-            let new_avg = match prev_avg {
-                Some(avg) if prev_count > 0 => ((avg * (weight - 1.0)) + tokens_per_sec) / weight,
-                _ => tokens_per_sec,
-            };
-            conn.execute(
+    /// Persist a model's running-average speed and sample count.
+    pub fn update_model_speed(
+        &self,
+        id: &str,
+        avg_tokens_per_sec: f64,
+        sample_count: i64,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.prepare_cached(
                 "UPDATE models SET avg_tokens_per_sec = ?1, speed_sample_count = ?2 WHERE id = ?3",
-                params![new_avg, new_count, id],
-            )?;
+            )?
+            .execute(params![avg_tokens_per_sec, sample_count, id])?;
             Ok(())
         })
     }
 }
 
 fn map_model(row: &Row<'_>) -> rusqlite::Result<ModelRecord> {
+    let provider_raw: String = row.get(2)?;
     let supports_thinking: i64 = row.get(7)?;
     let raw_params: String = row.get(8)?;
     Ok(ModelRecord {
         id: row.get(0)?,
         display_name: row.get(1)?,
-        provider_type: row.get(2)?,
+        provider_type: ModelProviderType::from_str_lossy(&provider_raw),
         file_path: row.get(3)?,
         mmproj_path: row.get(4)?,
         hf_repo: row.get(5)?,
@@ -131,13 +129,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn records_and_averages_model_speed() {
+    fn updates_and_reads_model_speed_stats() {
         let db = Database::open_in_memory().expect("open in-memory db");
 
         let model = ModelRecord {
             id: "m1".to_string(),
             display_name: "Test Model".to_string(),
-            provider_type: "llama_cpp".to_string(),
+            provider_type: ModelProviderType::LlamaCpp,
             file_path: None,
             mmproj_path: None,
             hf_repo: None,
@@ -148,12 +146,13 @@ mod tests {
         };
         db.upsert_model(&model).unwrap();
 
-        db.record_model_speed("m1", 30.0).unwrap();
+        assert_eq!(db.get_model_speed_stats("m1").unwrap(), Some((None, 0)));
+        db.update_model_speed("m1", 30.0, 1).unwrap();
+        assert_eq!(
+            db.get_model_speed_stats("m1").unwrap(),
+            Some((Some(30.0), 1))
+        );
         let after_first = db.get_model("m1").unwrap().unwrap();
         assert_eq!(after_first.avg_tokens_per_sec, Some(30.0));
-
-        db.record_model_speed("m1", 50.0).unwrap();
-        let after_second = db.get_model("m1").unwrap().unwrap();
-        assert_eq!(after_second.avg_tokens_per_sec, Some(40.0));
     }
 }

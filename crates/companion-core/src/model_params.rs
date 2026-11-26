@@ -38,6 +38,20 @@ impl ModelParams {
         serde_json::from_str::<Self>(trimmed).unwrap_or_default()
     }
 
+    /// Validate domain invariants (finite non-negative temperature, non-zero context and max tokens).
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.temperature.is_finite() || self.temperature < 0.0 {
+            return Err("Temperature must be a finite non-negative number".to_string());
+        }
+        if self.n_ctx == 0 {
+            return Err("Context length (n_ctx) must be greater than 0".to_string());
+        }
+        if self.max_tokens == 0 {
+            return Err("Max tokens must be greater than 0".to_string());
+        }
+        Ok(())
+    }
+
     /// Serialize [`ModelParams`] to JSON for SQLite storage.
     pub fn to_json(&self) -> Result<String> {
         Ok(serde_json::to_string(self)?)
@@ -75,5 +89,34 @@ mod tests {
         let with_unknown = ModelParams::from_json_lossy(r#"{"n_ctx": 2048, "future_flag": true}"#);
         assert_eq!(with_unknown.n_ctx, 2048);
         assert_eq!(with_unknown.temperature, ModelParams::default().temperature);
+    }
+
+    #[test]
+    fn model_params_validate_enforces_invariants() {
+        assert!(ModelParams::default().validate().is_ok());
+
+        let nan_temp = ModelParams {
+            temperature: f32::NAN,
+            ..ModelParams::default()
+        };
+        assert!(nan_temp.validate().is_err());
+
+        let neg_temp = ModelParams {
+            temperature: -0.1,
+            ..ModelParams::default()
+        };
+        assert!(neg_temp.validate().is_err());
+
+        let zero_ctx = ModelParams {
+            n_ctx: 0,
+            ..ModelParams::default()
+        };
+        assert!(zero_ctx.validate().is_err());
+
+        let zero_max = ModelParams {
+            max_tokens: 0,
+            ..ModelParams::default()
+        };
+        assert!(zero_max.validate().is_err());
     }
 }

@@ -3,15 +3,16 @@
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static VISION_LOOKUP_GEN: AtomicU64 = AtomicU64::new(0);
 
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
-use crate::models::download_manager::DownloadManager;
 use crate::models::gguf::inspect_gguf_metadata;
-use crate::models::huggingface::{MmprojMatch, find_matching_mmproj};
+use crate::models::huggingface::MmprojMatch;
 use crate::models::{format_bytes, friendly_model_name};
 use crate::storage::{Database, ModelRecord};
 use crate::ui::hf_browser::{HfBrowserContext, build_explore_subpage_with_query};
@@ -24,7 +25,6 @@ use super::vision_download::{VisionRowUi, start_mmproj_download};
 pub(super) struct VisionSetupCtx {
     pub(super) dialog: adw::PreferencesDialog,
     pub(super) db: Database,
-    pub(super) download_manager: DownloadManager,
     pub(super) refresh_installed: Rc<dyn Fn()>,
     pub(super) hf_ctx: HfBrowserContext,
 }
@@ -56,6 +56,49 @@ where
 }
 
 pub(super) fn lookup_and_enable_vision(ui: VisionRowUi, ctx: &VisionSetupCtx, model: ModelRecord) {
+    let still_searching = start_vision_search_pulse(&ui);
+    let lookup_name = model
+        .file_path
+        .as_deref()
+        .and_then(|p| Path::new(p).file_name())
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&model.display_name)
+        .to_string();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<Option<MmprojMatch>, String>>();
+    let hf_client = ctx.hf_ctx.services.hf_client.clone();
+    ctx.hf_ctx.services.rt_handle.spawn(async move {
+        let _ = tx.send(
+            hf_client
+                .find_matching_mmproj(&lookup_name)
+                .await
+                .map_err(|e| e.to_string()),
+        );
+    });
+
+    let lookup_gen = VISION_LOOKUP_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    let (ctx, dialog_weak) = (ctx.clone(), ctx.dialog.downgrade());
+    glib::MainContext::default().spawn_local(async move {
+        let res = rx.await;
+        still_searching.set(false);
+        ui.btn.set_sensitive(true);
+        ui.controls.container.set_visible(false);
+        if VISION_LOOKUP_GEN.load(Ordering::Relaxed) != lookup_gen
+            || dialog_weak.upgrade().is_none()
+        {
+            return;
+        }
+        match res {
+            Ok(Ok(Some(matched))) => present_matched_vision_confirm(ui, &ctx, model, matched),
+            Ok(Ok(None)) => present_manual_vision_guide(&ctx, model, None),
+            Ok(Err(err)) => present_manual_vision_guide(&ctx, model, Some(err)),
+            Err(_) => {}
+        }
+    });
+}
+
+fn start_vision_search_pulse(ui: &VisionRowUi) -> Rc<Cell<bool>> {
     ui.btn.set_sensitive(false);
     ui.controls.pct_label.set_text("");
     ui.controls.pause_btn.set_visible(false);
@@ -73,40 +116,7 @@ pub(super) fn lookup_and_enable_vision(ui: VisionRowUi, ctx: &VisionSetupCtx, mo
         progress_timer.pulse();
         glib::ControlFlow::Continue
     });
-
-    let lookup_name = model
-        .file_path
-        .as_deref()
-        .and_then(|p| Path::new(p).file_name())
-        .and_then(|n| n.to_str())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(&model.display_name)
-        .to_string();
-
-    let (tx, rx) = tokio::sync::oneshot::channel::<Result<Option<MmprojMatch>, String>>();
-    runtime().spawn(async move {
-        let res = find_matching_mmproj(&lookup_name)
-            .await
-            .map_err(|e| e.to_string());
-        let _ = tx.send(res);
-    });
-
-    let ctx = ctx.clone();
-    glib::MainContext::default().spawn_local(async move {
-        let res = rx.await;
-        still_searching.set(false);
-        ui.btn.set_sensitive(true);
-        ui.controls.container.set_visible(false);
-
-        match res {
-            Ok(Ok(Some(matched))) => {
-                present_matched_vision_confirm(ui, &ctx, model, matched);
-            }
-            Ok(Ok(None)) => present_manual_vision_guide(&ctx, model, None),
-            Ok(Err(err)) => present_manual_vision_guide(&ctx, model, Some(err)),
-            Err(_) => {}
-        }
-    });
+    still_searching
 }
 
 fn present_matched_vision_confirm(
@@ -143,12 +153,10 @@ fn present_matched_vision_confirm(
         "install" => {
             start_mmproj_download(
                 ui.clone(),
-                &ctx_cb.dialog,
-                &ctx_cb.download_manager,
+                &ctx_cb.hf_ctx,
                 model.clone(),
                 matched.repo_id.clone(),
                 Some(matched.file.clone()),
-                &ctx_cb.refresh_installed,
             );
         }
         "other" => present_manual_vision_guide(&ctx_cb, model.clone(), None),
@@ -185,12 +193,7 @@ fn present_manual_vision_guide(
 
     let ctx_cb = ctx.clone();
     alert.connect_response(None, move |_, resp| match resp {
-        "select" => select_local_mmproj(
-            &ctx_cb.dialog,
-            &ctx_cb.db,
-            &ctx_cb.refresh_installed,
-            &model,
-        ),
+        "select" => select_local_mmproj(&ctx_cb, &model),
         "explore" => {
             let query = friendly_model_name(&model.display_name);
             let subpage = build_explore_subpage_with_query(&ctx_cb.hf_ctx, Some(&query));
@@ -202,21 +205,18 @@ fn present_manual_vision_guide(
     alert.present(Some(&ctx.dialog));
 }
 
-fn select_local_mmproj(
-    dialog: &adw::PreferencesDialog,
-    db: &Database,
-    refresh_installed: &Rc<dyn Fn()>,
-    model: &ModelRecord,
-) {
-    let db = db.clone();
-    let dialog_toast = dialog.clone();
-    let refresh = refresh_installed.clone();
+fn select_local_mmproj(ctx: &VisionSetupCtx, model: &ModelRecord) {
+    let db = ctx.db.clone();
+    let rt_handle = ctx.hf_ctx.services.rt_handle.clone();
+    let dialog_toast = ctx.dialog.clone();
+    let refresh = ctx.refresh_installed.clone();
     let mut updated = model.clone();
     open_gguf_file_dialog(
-        dialog,
+        &ctx.dialog,
         &gettext("Select Vision Projector (mmproj.gguf)"),
         move |path| {
             spawn_blocking_ui(
+                &rt_handle,
                 move || {
                     if !inspect_gguf_metadata(&path).is_clip {
                         return Err(anyhow::anyhow!(gettext(

@@ -8,6 +8,14 @@ const TAG_PAIRS: &[(&str, &str)] = &[
     ("<|channel>thought", "<channel|>"),
 ];
 
+const OPEN_TAGS: &[&str] = &[
+    "<think>",
+    "<thought>",
+    "<|thought|>",
+    "<|channel>thought\n",
+    "<|channel>thought",
+];
+
 /// Incremental parser that separates reasoning blocks from visible answer text,
 /// handling tags split across arbitrary token boundaries.
 #[derive(Debug, Default)]
@@ -68,8 +76,7 @@ impl ThinkStreamParser {
                 self.buffer.drain(..start_idx + open_tag.len());
                 self.active_close_tag = Some(close_tag);
             } else {
-                let open_tags: Vec<&str> = TAG_PAIRS.iter().map(|(o, _)| *o).collect();
-                let safe = safe_prefix_len(&self.buffer, &open_tags);
+                let safe = safe_prefix_len(&self.buffer, OPEN_TAGS);
                 if safe > 0 {
                     let answer = self.buffer[..safe].to_string();
                     self.buffer.drain(..safe);
@@ -84,11 +91,12 @@ impl ThinkStreamParser {
 
     /// Flush any remaining buffered characters at end-of-stream.
     pub fn finish(&mut self) -> Vec<ParsedChunk> {
+        let active = self.active_close_tag.take();
         if self.buffer.is_empty() {
             return Vec::new();
         }
         let rest = std::mem::take(&mut self.buffer);
-        if self.active_close_tag.take().is_some() {
+        if active.is_some() {
             vec![ParsedChunk::Reasoning(rest)]
         } else {
             vec![ParsedChunk::Answer(rest)]
@@ -100,6 +108,10 @@ fn find_earliest_open(buf: &str) -> Option<(usize, &'static str, &'static str)> 
     let mut best: Option<(usize, &'static str, &'static str)> = None;
     for &(open, close) in TAG_PAIRS {
         if let Some(idx) = buf.find(open) {
+            // Wait if `<|channel>thought` sits at the exact end of `buf` so `\n` can still arrive.
+            if open == "<|channel>thought" && idx + open.len() == buf.len() {
+                continue;
+            }
             let replace = match best {
                 None => true,
                 Some((best_idx, best_open, _)) => {

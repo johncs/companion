@@ -1,9 +1,19 @@
 //! Pure system prompt template rendering and personalization composition.
 
-use crate::AssistantPersonality;
+use crate::{AssistantPersonality, render_placeholders};
 
 pub const CORE_SYSTEM_RULES: &str = "Core rules: Be accurate, concise, and honest. If you are unsure or lack information, say so directly instead of guessing. Never fabricate file contents, command outputs, or tool results. Reply in the user's language.";
 pub const DEFAULT_SYSTEM_PROMPT: &str = "";
+
+/// Personalization profile inputs for composing the system prompt.
+#[derive(Debug, Clone, Copy)]
+pub struct PersonalizationProfile<'a> {
+    pub assistant_name: &'a str,
+    pub user_name: Option<&'a str>,
+    pub personality: AssistantPersonality,
+    pub custom_personality: Option<&'a str>,
+    pub user_about: Option<&'a str>,
+}
 
 /// Return the default per-chat system prompt template.
 pub fn default_system_prompt() -> &'static str {
@@ -16,9 +26,14 @@ pub fn render_system_prompt(
     assistant_name: &str,
     user_name: Option<&str>,
 ) -> String {
-    let mut out = template
-        .replace("{assistant_name}", assistant_name)
-        .replace("{user_name}", user_name.unwrap_or("the user"));
+    let user_label = user_name.unwrap_or("the user");
+    let mut out = render_placeholders(
+        template,
+        &[
+            ("assistant_name", assistant_name),
+            ("user_name", user_label),
+        ],
+    );
     if assistant_name != "Companion" && out.starts_with("You are Companion,") {
         out = out.replacen(
             "You are Companion,",
@@ -33,17 +48,13 @@ pub fn render_system_prompt(
 /// and per-chat instructions.
 pub fn compose_personalized_system_prompt(
     chat_prompt: &str,
-    assistant_name: &str,
-    user_name: Option<&str>,
-    personality: AssistantPersonality,
-    custom_personality: Option<&str>,
-    user_about: Option<&str>,
+    profile: &PersonalizationProfile<'_>,
 ) -> String {
-    let effective_assistant = match assistant_name.trim() {
+    let effective_assistant = match profile.assistant_name.trim() {
         "" => "Companion",
         s => s,
     };
-    let clean_user = user_name.map(str::trim).filter(|s| !s.is_empty());
+    let clean_user = profile.user_name.map(str::trim).filter(|s| !s.is_empty());
     let mut layers = vec![
         CORE_SYSTEM_RULES.to_string(),
         format!("Your name is {effective_assistant}."),
@@ -51,13 +62,17 @@ pub fn compose_personalized_system_prompt(
     if let Some(uname) = clean_user {
         layers.push(format!("The user's name is {uname}."));
     }
-    layers.push(personality.resolve_guidance(effective_assistant, clean_user, custom_personality));
-    if let Some(about) = user_about.map(str::trim).filter(|s| !s.is_empty()) {
+    layers.push(profile.personality.resolve_guidance(
+        effective_assistant,
+        clean_user,
+        profile.custom_personality,
+    ));
+    if let Some(about) = profile.user_about.map(str::trim).filter(|s| !s.is_empty()) {
         let who = clean_user.unwrap_or("the user");
         layers.push(format!("About {who}: {about}"));
     }
 
-    let rendered_chat = render_system_prompt(chat_prompt, effective_assistant, user_name);
+    let rendered_chat = render_system_prompt(chat_prompt, effective_assistant, clean_user);
     let trimmed_chat = rendered_chat.trim();
     if !trimmed_chat.is_empty() {
         layers.push(trimmed_chat.to_string());

@@ -128,7 +128,7 @@ pub(super) fn migrate_v4(conn: &Transaction<'_>) -> Result<()> {
             arguments_json      TEXT NOT NULL,
             status              TEXT NOT NULL,
             output              TEXT,
-            permission_decision TEXT NOT NULL DEFAULT 'ask',
+            permission_decision TEXT NOT NULL DEFAULT 'deny',
             created_at          INTEGER NOT NULL DEFAULT 0
         );
 
@@ -290,6 +290,14 @@ pub(super) fn migrate_v16(tx: &Transaction<'_>) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+pub(super) fn migrate_v17(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_pinned_updated
+         ON conversations(pinned DESC, updated_at DESC);",
+    )?;
     Ok(())
 }
 

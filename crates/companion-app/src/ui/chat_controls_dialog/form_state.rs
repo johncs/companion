@@ -44,6 +44,18 @@ impl ChatControlsFormState {
             || prompt.trim() != self.init_prompt
     }
 
+    pub(super) fn is_default(
+        &self,
+        thinking_idx: u32,
+        ctx_idx: u32,
+        prompt: &str,
+        default_prompt: &str,
+    ) -> bool {
+        thinking_idx == self.default_thinking_idx
+            && self.selected_ctx(ctx_idx) == crate::core::model_params::ModelParams::default().n_ctx
+            && prompt.trim() == default_prompt.trim()
+    }
+
     pub(super) fn format_usage(used_tokens: u32, max_ctx: u32) -> (f64, String) {
         let fraction = (used_tokens as f64 / max_ctx.max(1) as f64).clamp(0.0, 1.0);
         let pct = (fraction * 100.0).round() as u32;

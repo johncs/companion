@@ -2,17 +2,23 @@
 
 use std::path::{Path, PathBuf};
 
-/// Extract existing `@/abs/path` mentions from user text.
+/// Extract existing `@/abs/path` mentions from user text (bounded to avoid excessive stat calls).
 pub fn extract_mentioned_os_paths(text: &str) -> Vec<PathBuf> {
+    const MAX_AT_MENTION_CHECKS: usize = 32;
     let mut out = Vec::new();
+    let mut checks = 0usize;
     for token in text.split_whitespace() {
+        if checks >= MAX_AT_MENTION_CHECKS {
+            break;
+        }
         let Some(raw) = token.strip_prefix('@') else {
             continue;
         };
         let cleaned = raw.trim_end_matches([',', '.', ';', ':', ')', ']', '"', '\'']);
-        if !cleaned.starts_with('/') {
+        if !cleaned.starts_with('/') || cleaned.len() > 512 {
             continue;
         }
+        checks += 1;
         let path = Path::new(cleaned);
         if (path.is_dir() || path.is_file())
             && let Ok(canon) = std::fs::canonicalize(path)
@@ -37,58 +43,61 @@ pub fn detect_existing_os_paths_in_text(text: &str) -> Vec<PathBuf> {
         let bytes = line.as_bytes();
         let mut i = 0;
         while i < bytes.len() && stat_checks < MAX_STAT_CHECKS {
-            if bytes[i] == b'/'
+            let is_slash_start = bytes[i] == b'/'
                 && (i == 0
                     || matches!(
                         bytes[i - 1],
                         b' ' | b'\t' | b'"' | b'\'' | b'(' | b'[' | b'@'
-                    ))
+                    ));
+            if is_slash_start
+                && let Some(matched_len) =
+                    try_match_path_at(&line[i..], &mut stat_checks, MAX_STAT_CHECKS, &mut out)
             {
-                let rest = &line[i..];
-                let mut matched_len = 0usize;
-                let mut end_indices: Vec<usize> = rest
-                    .char_indices()
-                    .filter_map(|(idx, ch)| {
-                        if ch.is_whitespace() || matches!(ch, '"' | '\'' | '?' | ',' | ')' | ']') {
-                            Some(idx)
-                        } else {
-                            None
-                        }
-                    })
-                    .take(12)
-                    .collect();
-                end_indices.push(rest.len());
-
-                for &end in end_indices.iter().rev() {
-                    if stat_checks >= MAX_STAT_CHECKS {
-                        break;
-                    }
-                    let candidate = rest[..end]
-                        .trim()
-                        .trim_end_matches(['?', ',', '.', ';', ':', ')', ']', '"', '\'']);
-                    if candidate.len() > 1 {
-                        stat_checks += 1;
-                        let p = Path::new(candidate);
-                        if (p.is_file() || p.is_dir())
-                            && let Ok(canon) = std::fs::canonicalize(p)
-                        {
-                            if !out.contains(&canon) {
-                                out.push(canon);
-                            }
-                            matched_len = end;
-                            break;
-                        }
-                    }
-                }
-                if matched_len > 0 {
-                    i += matched_len;
-                    continue;
-                }
+                i += matched_len;
+                continue;
             }
             i += line[i..].chars().next().map_or(1, char::len_utf8);
         }
     }
     out
+}
+
+fn try_match_path_at(
+    rest: &str,
+    stat_checks: &mut usize,
+    max_checks: usize,
+    out: &mut Vec<PathBuf>,
+) -> Option<usize> {
+    let mut end_indices: Vec<usize> = rest
+        .char_indices()
+        .filter_map(|(idx, ch)| {
+            (ch.is_whitespace() || matches!(ch, '"' | '\'' | '?' | ',' | ')' | ']')).then_some(idx)
+        })
+        .take(12)
+        .collect();
+    end_indices.push(rest.len());
+
+    for &end in end_indices.iter().rev() {
+        if *stat_checks >= max_checks {
+            break;
+        }
+        let candidate = rest[..end]
+            .trim()
+            .trim_end_matches(['?', ',', '.', ';', ':', ')', ']', '"', '\'']);
+        if candidate.len() > 1 {
+            *stat_checks += 1;
+            let p = Path::new(candidate);
+            if (p.is_file() || p.is_dir())
+                && let Ok(canon) = std::fs::canonicalize(p)
+            {
+                if !out.contains(&canon) {
+                    out.push(canon);
+                }
+                return Some(end);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

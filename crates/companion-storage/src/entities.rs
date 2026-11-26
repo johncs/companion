@@ -3,8 +3,30 @@
 use companion_core::ThinkingLevel;
 use companion_core::model_params::ModelParams;
 use companion_core::types::{
-    ExecutionDevice, FolderPermission, MessageRole, PermissionDecision, ToolCallStatus,
+    ExecutionDevice, FolderPermission, MessageRole, ModelProviderType, PermissionDecision,
+    ToolCallStatus,
 };
+
+/// Parameters for inserting a new conversation row.
+#[derive(Debug, Clone, Default)]
+pub struct NewConversation<'a> {
+    pub title: &'a str,
+    pub model_id: Option<&'a str>,
+    pub persona_id: Option<&'a str>,
+    pub system_prompt: Option<String>,
+    pub thinking_level: ThinkingLevel,
+    pub web_search_enabled: bool,
+}
+
+impl<'a> NewConversation<'a> {
+    /// Construct a new conversation descriptor with only a title and default settings.
+    pub fn with_title(title: &'a str) -> Self {
+        Self {
+            title,
+            ..Default::default()
+        }
+    }
+}
 
 /// A chat session.
 #[derive(Debug, Clone)]
@@ -81,7 +103,7 @@ pub struct ToolCallRecord {
 pub struct ModelRecord {
     pub id: String,
     pub display_name: String,
-    pub provider_type: String,
+    pub provider_type: ModelProviderType,
     pub file_path: Option<String>,
     pub mmproj_path: Option<String>,
     pub hf_repo: Option<String>,

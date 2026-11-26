@@ -48,7 +48,7 @@ fn upgrades_v15_with_legacy_pending_downloads_json_to_v16() {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
     let legacy_left: i64 = conn
         .query_row(
@@ -85,7 +85,7 @@ fn failed_migration_rolls_back_atomically() {
 
     let mut conn = Connection::open_in_memory().unwrap();
     let err = run_migration_list(&mut conn, &[(1, ok_v1), (2, failing_v2)]).unwrap_err();
-    assert!(err.to_string().contains("simulated migration failure"));
+    assert!(format!("{err:#}").contains("simulated migration failure"));
 
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -100,4 +100,13 @@ fn failed_migration_rolls_back_atomically() {
         )
         .unwrap();
     assert_eq!(t2_exists, 0);
+}
+
+#[test]
+fn rejects_future_schema_version() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION + 1)
+        .unwrap();
+    let err = run_migrations(&mut conn).unwrap_err();
+    assert!(err.to_string().contains("newer than supported version"));
 }

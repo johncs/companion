@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 companion-core.workspace = true
+companion-format.workspace = true
 companion-storage.workspace = true
 companion-models.workspace = true
 companion-agent.workspace = true

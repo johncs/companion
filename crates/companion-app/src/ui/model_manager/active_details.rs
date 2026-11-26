@@ -11,8 +11,8 @@ use crate::models::format_bytes;
 use crate::storage::{Database, ModelRecord};
 use crate::ui::widgets::present_destructive_confirm;
 
-use super::inventory::{InstalledModelInfo, delete_managed_model_files};
 use super::view_model::ActiveModelViewModel;
+use crate::models::inventory::{InstalledModelInfo, delete_managed_model_files};
 
 #[derive(Clone)]
 pub(super) struct ActiveDetailRows {
@@ -87,6 +87,7 @@ pub(super) struct InstalledRowCtx {
     pub(super) dialog: adw::PreferencesDialog,
     pub(super) on_refresh: Rc<dyn Fn()>,
     pub(super) models_dir: PathBuf,
+    pub(super) rt_handle: tokio::runtime::Handle,
 }
 
 pub(super) fn build_installed_model_row(
@@ -100,10 +101,10 @@ pub(super) fn build_installed_model_row(
         .unwrap_or_else(|| gettext("Missing file"));
 
     let row = adw::ActionRow::builder()
-        .title(crate::core::markdown::escape_pango_markup(
+        .title(crate::format::markdown::escape_pango_markup(
             &model.display_name,
         ))
-        .subtitle(crate::core::markdown::escape_pango_markup(&size_str))
+        .subtitle(crate::format::markdown::escape_pango_markup(&size_str))
         .build();
 
     let active_badge = gtk::Label::builder()
@@ -121,85 +122,114 @@ pub(super) fn build_installed_model_row(
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();
-    {
-        let db = ctx.db.clone();
-        let installed_group = ctx.installed_group.clone();
-        let active_id_state = ctx.active_id_state.clone();
-        let on_active_changed = ctx.on_active_changed.clone();
-        let dialog = ctx.dialog.clone();
-        let on_refresh = ctx.on_refresh.clone();
-        let model_clone = model.clone();
-        let models_dir = ctx.models_dir.clone();
-
-        delete_btn.connect_clicked(move |_| {
-            let is_managed_file = model_clone
-                .file_path
-                .as_deref()
-                .is_some_and(|p| Path::new(p).starts_with(&models_dir));
-
-            let body = if is_managed_file {
-                tr_f(
-                    "Delete \"{name}\" and remove its downloaded files from disk?",
-                    &[("name", &model_clone.display_name)],
-                )
-            } else {
-                tr_f(
-                    "Remove \"{name}\" from Companion? (Your imported .gguf file on disk will not be deleted.)",
-                    &[("name", &model_clone.display_name)],
-                )
-            };
-
-            let db = db.clone();
-            let active_id_state = active_id_state.clone();
-            let on_active_changed = on_active_changed.clone();
-            let dialog = dialog.clone();
-            let on_refresh = on_refresh.clone();
-            let model_inner = model_clone.clone();
-            let models_dir_inner = models_dir.clone();
-
-            present_destructive_confirm(
-                &installed_group,
-                &gettext("Remove AI Model?"),
-                &body,
-                &gettext("Remove"),
-                move || {
-                    let db = db.clone();
-                    let active_id_state = active_id_state.clone();
-                    let on_active_changed = on_active_changed.clone();
-                    let dialog = dialog.clone();
-                    let on_refresh = on_refresh.clone();
-                    let model_inner = model_inner.clone();
-                    let models_dir_inner = models_dir_inner.clone();
-                    let model_id = model_inner.id.clone();
-                    let display_name = model_inner.display_name.clone();
-                    crate::ui::widgets::spawn_blocking_ui(
-                        move || {
-                            let others: Vec<ModelRecord> = db
-                                .list_models()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .filter(|m| m.id != model_inner.id)
-                                .collect();
-                            delete_managed_model_files(&models_dir_inner, &model_inner, &others);
-                            let _ = db.delete_model(&model_inner.id);
-                        },
-                        move |()| {
-                            if active_id_state.borrow().as_deref() == Some(&model_id) {
-                                *active_id_state.borrow_mut() = None;
-                                on_active_changed(None);
-                            }
-                            dialog.add_toast(adw::Toast::new(&tr_f(
-                                "Removed \"{name}\"",
-                                &[("name", &display_name)],
-                            )));
-                            on_refresh();
-                        },
-                    );
-                },
-            );
-        });
-    }
-
+    wire_delete_model_button(&delete_btn, model, ctx);
     row.add_suffix(&delete_btn);
     (row, active_badge)
+}
+
+fn wire_delete_model_button(delete_btn: &gtk::Button, model: &ModelRecord, ctx: &InstalledRowCtx) {
+    let (
+        db,
+        installed_group,
+        active_id_state,
+        on_active_changed,
+        dialog,
+        on_refresh,
+        model_clone,
+        models_dir,
+        rt_handle,
+    ) = (
+        ctx.db.clone(),
+        ctx.installed_group.clone(),
+        ctx.active_id_state.clone(),
+        ctx.on_active_changed.clone(),
+        ctx.dialog.clone(),
+        ctx.on_refresh.clone(),
+        model.clone(),
+        ctx.models_dir.clone(),
+        ctx.rt_handle.clone(),
+    );
+    delete_btn.connect_clicked(move |_| {
+        let is_managed = model_clone.file_path.as_deref().is_some_and(|p| Path::new(p).starts_with(&models_dir));
+        let body = if is_managed {
+            tr_f("Delete \"{name}\" and remove its downloaded files from disk?", &[("name", &model_clone.display_name)])
+        } else {
+            tr_f("Remove \"{name}\" from Companion? (Your imported .gguf file on disk will not be deleted.)", &[("name", &model_clone.display_name)])
+        };
+        let (db, active_id_state, on_active_changed, dialog, on_refresh, model_inner, models_dir_inner, rt_handle_inner) = (
+            db.clone(), active_id_state.clone(), on_active_changed.clone(), dialog.clone(),
+            on_refresh.clone(), model_clone.clone(), models_dir.clone(), rt_handle.clone(),
+        );
+        present_destructive_confirm(&installed_group, &gettext("Remove AI Model?"), &body, &gettext("Remove"), move || {
+            execute_model_deletion(ModelDeleteReq {
+                db: db.clone(),
+                active_id_state: active_id_state.clone(),
+                on_active_changed: on_active_changed.clone(),
+                dialog: dialog.clone(),
+                on_refresh: on_refresh.clone(),
+                model: model_inner.clone(),
+                models_dir: models_dir_inner.clone(),
+                rt_handle: rt_handle_inner.clone(),
+            });
+        });
+    });
+}
+
+struct ModelDeleteReq {
+    db: Database,
+    active_id_state: Rc<RefCell<Option<String>>>,
+    on_active_changed: Rc<dyn Fn(Option<String>)>,
+    dialog: adw::PreferencesDialog,
+    on_refresh: Rc<dyn Fn()>,
+    model: ModelRecord,
+    models_dir: std::path::PathBuf,
+    rt_handle: tokio::runtime::Handle,
+}
+
+fn execute_model_deletion(req: ModelDeleteReq) {
+    let ModelDeleteReq {
+        db,
+        active_id_state,
+        on_active_changed,
+        dialog,
+        on_refresh,
+        model: model_inner,
+        models_dir: models_dir_inner,
+        rt_handle,
+    } = req;
+    let model_id = model_inner.id.clone();
+    let display_name = model_inner.display_name.clone();
+    crate::ui::widgets::spawn_blocking_ui(
+        &rt_handle,
+        move || -> Result<(), String> {
+            let others: Vec<ModelRecord> = db
+                .list_models()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.id != model_inner.id)
+                .collect();
+            delete_managed_model_files(&models_dir_inner, &model_inner, &others);
+            db.delete_model(&model_inner.id).map_err(|e| e.to_string())
+        },
+        move |res| match res {
+            Ok(()) => {
+                if active_id_state.borrow().as_deref() == Some(&model_id) {
+                    *active_id_state.borrow_mut() = None;
+                    on_active_changed(None);
+                }
+                dialog.add_toast(adw::Toast::new(&tr_f(
+                    "Removed \"{name}\"",
+                    &[("name", &display_name)],
+                )));
+                on_refresh();
+            }
+            Err(err) => {
+                tracing::error!("Failed to delete model {model_id}: {err}");
+                dialog.add_toast(adw::Toast::new(&tr_f(
+                    "Failed to remove model: {err}",
+                    &[("err", &err)],
+                )));
+            }
+        },
+    );
 }

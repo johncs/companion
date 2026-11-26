@@ -99,7 +99,7 @@ fn applies_qwen_think_and_no_think_flags() {
         "<__media__>",
         ChatTemplateFamily::QwenThinking,
     );
-    assert_eq!(on[0].0, "system");
+    assert_eq!(on[0].0, ChatRole::System);
     assert!(on[1].1.ends_with(" /think"));
 
     let off = prepare_turns(
@@ -124,21 +124,40 @@ fn applies_qwen_think_and_no_think_flags() {
 #[test]
 fn formats_chatml_fallback_with_explicit_thinking() {
     let msgs = vec![turn(ChatRole::User, "Ping")];
-    let prepared = prepare_turns(
+    let prepared_generic = prepare_turns(
         &msgs,
         ThinkingLevel::Low,
         false,
         "<__media__>",
         ChatTemplateFamily::Generic,
     );
-    let (prompt, close) = format_chatml_fallback(&prepared, ThinkingLevel::Low);
-    assert_eq!(close, Some("</think>"));
-    assert!(prompt.contains("<|im_start|>system\nReasoning effort: low (brief)."));
-    assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n"));
+    let (generic_prompt, generic_close) = format_chatml_fallback(
+        &prepared_generic,
+        ChatTemplateFamily::Generic,
+        ThinkingLevel::Low,
+    );
+    assert_eq!(generic_close, None);
+    assert!(generic_prompt.contains("<|im_start|>system\nReasoning effort: low (brief)."));
+    assert!(generic_prompt.ends_with("<|im_start|>assistant\n"));
+
+    let prepared_qwen = prepare_turns(
+        &msgs,
+        ThinkingLevel::Low,
+        false,
+        "<__media__>",
+        ChatTemplateFamily::QwenThinking,
+    );
+    let (qwen_prompt, qwen_close) = format_chatml_fallback(
+        &prepared_qwen,
+        ChatTemplateFamily::QwenThinking,
+        ThinkingLevel::Low,
+    );
+    assert_eq!(qwen_close, Some("</think>"));
+    assert!(qwen_prompt.ends_with("<|im_start|>assistant\n<think>\n"));
 }
 
 #[test]
-fn trims_oldest_turns_while_preserving_system_and_latest_user() {
+fn trims_oldest_turns_and_drops_orphaned_leading_assistant_and_accounts_for_images() {
     let turns = vec![
         turn(ChatRole::System, &"s".repeat(40)),
         turn(ChatRole::User, &"1".repeat(200)),
@@ -148,10 +167,19 @@ fn trims_oldest_turns_while_preserving_system_and_latest_user() {
         turn(ChatRole::User, &"5".repeat(80)),
     ];
     let kept = trim_turns_to_budget(&turns, 512, |s| s.len());
-    assert_eq!(kept.len(), 3);
+    // Turn 4 (Assistant) is dropped because its preceding User turn (3) did not fit.
+    assert_eq!(kept.len(), 2);
     assert!(matches!(kept[0].role, ChatRole::System));
-    assert!(kept[1].content.starts_with('4'));
-    assert!(kept[2].content.starts_with('5'));
+    assert!(kept[1].content.starts_with('5'));
+
+    // Vision token budget (256 tokens per image) should evict older image turns.
+    let mut old_img = turn(ChatRole::User, "old");
+    old_img.images = vec!["/tmp/old.png".to_string()];
+    let mut new_img = turn(ChatRole::User, "new");
+    new_img.images = vec!["/tmp/new.png".to_string()];
+    let vision_kept = trim_turns_to_budget(&[old_img, new_img], 512, |s| s.len());
+    assert_eq!(vision_kept.len(), 1);
+    assert_eq!(vision_kept[0].images, vec!["/tmp/new.png"]);
 }
 
 #[test]
@@ -198,5 +226,28 @@ fn prepare_turns_merges_existing_system_prompt_idempotently() {
         "<__media__>",
         ChatTemplateFamily::Gemma4,
     );
-    assert_eq!(gemma[0].1, "<|think|>\nAlready set.");
+    assert!(
+        gemma[0]
+            .1
+            .starts_with("<|think|>\nReasoning effort: low (brief).")
+    );
+    assert!(gemma[0].1.ends_with("Already set."));
+
+    let gemma_idempotent = prepare_turns(
+        &[
+            turn(
+                ChatRole::System,
+                "<|think|>\nReasoning effort: high (thorough).\n\nAlready set.",
+            ),
+            turn(ChatRole::User, "Hi"),
+        ],
+        ThinkingLevel::Low,
+        false,
+        "<__media__>",
+        ChatTemplateFamily::Gemma4,
+    );
+    assert_eq!(
+        gemma_idempotent[0].1,
+        "<|think|>\nReasoning effort: high (thorough).\n\nAlready set."
+    );
 }

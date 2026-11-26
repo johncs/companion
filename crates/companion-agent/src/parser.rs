@@ -93,13 +93,30 @@ pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
 
     while let Some((start, open, close)) = find_earliest_open_tag(rest) {
         let after_start = &rest[start + open.len()..];
+        let next_open = find_earliest_open_tag(after_start).map(|(idx, _, _)| idx);
         let Some(end) = after_start.find(close) else {
+            if let Some(next_idx) = next_open {
+                if let Some(parsed) = parse_tool_payload(&after_start[..next_idx]) {
+                    calls.push(parsed);
+                }
+                rest = &after_start[next_idx..];
+                continue;
+            }
             // Recover a trailing tool call if the model omitted the closing tag at end-of-turn.
             if let Some(parsed) = parse_tool_payload(after_start) {
                 calls.push(parsed);
             }
             break;
         };
+        if let Some(next_idx) = next_open
+            && next_idx < end
+        {
+            if let Some(parsed) = parse_tool_payload(&after_start[..next_idx]) {
+                calls.push(parsed);
+            }
+            rest = &after_start[next_idx..];
+            continue;
+        }
         if let Some(parsed) = parse_tool_payload(&after_start[..end]) {
             calls.push(parsed);
         }
@@ -130,8 +147,19 @@ pub fn strip_tool_calls(text: &str) -> String {
 
     let mut collapsed = String::with_capacity(out.len());
     let mut empty_run = 0usize;
+    let mut in_fence = false;
     for line in out.lines() {
-        if line.trim().is_empty() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        if in_fence {
+            empty_run = 0;
+            if !collapsed.is_empty() {
+                collapsed.push('\n');
+            }
+            collapsed.push_str(line);
+        } else if line.trim().is_empty() {
             empty_run += 1;
             if empty_run <= 1 && !collapsed.is_empty() {
                 collapsed.push('\n');
@@ -197,5 +225,20 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(strip_tool_calls(text), "Before  middle  after");
+    }
+
+    #[test]
+    fn unclosed_call_before_valid_call_and_fenced_code_whitespace_preserved() {
+        let mixed = "<tool_call>broken\n<tool_call>{\"name\":\"list_files\",\"arguments\":{\"subdir\":\".\"}}</tool_call>";
+        let calls = parse_tool_calls(mixed);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_files");
+
+        let fenced =
+            "Intro\n```python\ndef a():\n    pass\n\n\ndef b():  \n    pass\n```\n\n\nOutro";
+        assert_eq!(
+            strip_tool_calls(fenced),
+            "Intro\n```python\ndef a():\n    pass\n\n\ndef b():  \n    pass\n```\n\nOutro"
+        );
     }
 }

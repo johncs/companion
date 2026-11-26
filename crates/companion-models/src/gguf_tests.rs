@@ -34,7 +34,8 @@ fn sample_gguf_bytes(arch: &str, ctx: u32) -> Vec<u8> {
 #[test]
 fn parses_gguf_context_length_and_chat_template() {
     let buf = sample_gguf_bytes("gemma4", 131072);
-    let meta = parse_gguf_reader(&mut Cursor::new(buf)).expect("valid GGUF header");
+    let len = buf.len() as u64;
+    let meta = parse_gguf_reader(&mut Cursor::new(buf), len).expect("valid GGUF header");
     assert_eq!(meta.max_context, Some(131072));
     assert!(meta.supports_thinking);
     assert!(!meta.is_clip);
@@ -52,8 +53,45 @@ fn detects_clip_projector_architecture() {
     buf.extend_from_slice(&8u32.to_le_bytes());
     push_str(&mut buf, "clip");
 
-    let meta = parse_gguf_reader(&mut Cursor::new(buf)).expect("valid GGUF header");
+    let len = buf.len() as u64;
+    let meta = parse_gguf_reader(&mut Cursor::new(buf), len).expect("valid GGUF header");
     assert!(meta.is_clip);
+}
+
+#[test]
+fn resolves_arch_context_regardless_of_kv_order_and_caps_array_depth() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"GGUF");
+    buf.extend_from_slice(&3u32.to_le_bytes());
+    buf.extend_from_slice(&0u64.to_le_bytes());
+    buf.extend_from_slice(&3u64.to_le_bytes());
+
+    // Context length appears BEFORE general.architecture.
+    push_str(&mut buf, "other.context_length");
+    buf.extend_from_slice(&4u32.to_le_bytes());
+    buf.extend_from_slice(&4096u32.to_le_bytes());
+
+    push_str(&mut buf, "llama.context_length");
+    buf.extend_from_slice(&4u32.to_le_bytes());
+    buf.extend_from_slice(&65536u32.to_le_bytes());
+
+    push_str(&mut buf, "general.architecture");
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    push_str(&mut buf, "llama");
+
+    let len = buf.len() as u64;
+    let meta = parse_gguf_reader(&mut Cursor::new(buf), len).unwrap();
+    assert_eq!(meta.max_context, Some(65536));
+
+    // Deeply nested arrays (> MAX_ARRAY_DEPTH) must fail safely without stack overflow.
+    let mut nested = Vec::new();
+    for _ in 0..16 {
+        nested.extend_from_slice(&9u32.to_le_bytes()); // array type
+        nested.extend_from_slice(&1u64.to_le_bytes()); // count = 1
+    }
+    nested.extend_from_slice(&4u32.to_le_bytes());
+    let nlen = nested.len() as u64;
+    assert!(skip_gguf_value(&mut Cursor::new(nested), 9, nlen, 0).is_none());
 }
 
 #[test]

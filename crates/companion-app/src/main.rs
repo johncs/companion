@@ -5,10 +5,14 @@
 pub(crate) use companion_agent as agent;
 pub(crate) use companion_core as core;
 pub(crate) use companion_core::i18n;
+pub(crate) use companion_format as format;
 pub(crate) use companion_inference as inference;
 pub(crate) use companion_models as models;
 pub(crate) use companion_storage as storage;
+mod services;
 mod ui;
+
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -16,6 +20,7 @@ use relm4::RelmApp;
 use tracing_subscriber::EnvFilter;
 
 use crate::i18n::{gettext, tr_f};
+use crate::services::AppServices;
 
 pub const APP_ID: &str = "io.github.companion.Companion";
 
@@ -29,21 +34,30 @@ fn main() {
     i18n::init();
 
     let paths = core::paths::AppPaths::from_data_dir(glib::user_data_dir());
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            tracing::error!("Tokio runtime initialization failed: {err}");
+            show_startup_error(&paths.db_path, &err.to_string());
+            return;
+        }
+    };
+
     match storage::Database::open(&paths.db_path) {
         Ok(db) => {
-            if db.get_setting("user_name").ok().flatten().is_none() {
-                let real = glib::real_name().to_string_lossy().trim().to_string();
-                if !real.is_empty() && real != "Unknown" {
-                    let _ = db.set_user_name(&real);
+            let services = match AppServices::new(db, rt.handle().clone(), paths.clone()) {
+                Ok(services) => Arc::new(services),
+                Err(err) => {
+                    tracing::error!("Service initialization failed: {err}");
+                    show_startup_error(&paths.db_path, &err.to_string());
+                    return;
                 }
-            }
-            if let Err(err) =
-                models::registry::ModelRegistryService::sync_managed_models(&db, &paths.models_dir)
-            {
-                tracing::warn!("Failed to synchronize managed models: {err}");
-            }
+            };
             let app = RelmApp::new(APP_ID);
-            app.run::<ui::window::MainWindow>((db, paths));
+            app.run::<ui::window::MainWindow>(services);
         }
         Err(err) => {
             tracing::error!("Database initialization failed: {err}");

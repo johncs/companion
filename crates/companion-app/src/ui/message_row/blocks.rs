@@ -5,13 +5,13 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 
-use crate::core::markdown::{MarkdownBlock, format_code_language};
+use crate::format::markdown::{MarkdownBlock, format_code_language};
 use crate::i18n::gettext;
 use crate::ui::message_dialogs::copy_text_with_feedback;
 use crate::ui::widgets::clear_box;
 
 #[derive(Debug, PartialEq, Eq)]
-enum BlockUpdatePlan {
+pub(super) enum BlockUpdatePlan {
     Skip,
     UpdateLastText,
     UpdateLastCode,
@@ -19,7 +19,7 @@ enum BlockUpdatePlan {
     RebuildAll,
 }
 
-fn plan_block_update(
+pub(super) fn plan_block_update(
     prev: &[MarkdownBlock],
     prev_is_dark: bool,
     new_blocks: &[MarkdownBlock],
@@ -86,41 +86,20 @@ pub(super) fn update_blocks_box(
     match plan {
         BlockUpdatePlan::Skip => (),
         BlockUpdatePlan::UpdateLastText => {
-            if let (Some(MarkdownBlock::Text(new_markup)), Some(last_widget)) =
-                (new_blocks.last(), blocks_box.last_child())
-                && let Ok(label) = last_widget.downcast::<gtk::Label>()
-            {
-                apply_markup_to_label(&label, new_markup);
-                *rendered_cache.borrow_mut() = new_blocks.to_vec();
+            if !try_update_last_text(blocks_box, new_blocks) {
+                let prefix_len = rendered_cache.borrow().len().saturating_sub(1);
+                replace_tail(blocks_box, rendered_cache, new_blocks, prefix_len, is_dark);
                 return;
             }
-            let prefix_len = rendered_cache.borrow().len().saturating_sub(1);
-            replace_tail(blocks_box, rendered_cache, new_blocks, prefix_len, is_dark);
+            *rendered_cache.borrow_mut() = new_blocks.to_vec();
         }
         BlockUpdatePlan::UpdateLastCode => {
-            if let (
-                Some(MarkdownBlock::Code {
-                    light_pango_markup,
-                    dark_pango_markup,
-                    ..
-                }),
-                Some(last_widget),
-            ) = (new_blocks.last(), blocks_box.last_child())
-                && let Some(code_box) = last_widget.downcast_ref::<gtk::Box>()
-                && let Some(scroller) = code_box.last_child().and_downcast::<gtk::ScrolledWindow>()
-                && let Some(code_label) = scroller.child().and_downcast::<gtk::Label>()
-            {
-                let markup = if is_dark {
-                    dark_pango_markup
-                } else {
-                    light_pango_markup
-                };
-                code_label.set_markup(markup);
-                *rendered_cache.borrow_mut() = new_blocks.to_vec();
+            if !try_update_last_code(blocks_box, new_blocks, is_dark) {
+                let prefix_len = rendered_cache.borrow().len().saturating_sub(1);
+                replace_tail(blocks_box, rendered_cache, new_blocks, prefix_len, is_dark);
                 return;
             }
-            let prefix_len = rendered_cache.borrow().len().saturating_sub(1);
-            replace_tail(blocks_box, rendered_cache, new_blocks, prefix_len, is_dark);
+            *rendered_cache.borrow_mut() = new_blocks.to_vec();
         }
         BlockUpdatePlan::ReplaceTail(prefix_len) => {
             replace_tail(blocks_box, rendered_cache, new_blocks, prefix_len, is_dark);
@@ -134,6 +113,44 @@ pub(super) fn update_blocks_box(
             rendered_is_dark.set(is_dark);
         }
     }
+}
+
+fn try_update_last_text(blocks_box: &gtk::Box, new_blocks: &[MarkdownBlock]) -> bool {
+    if let (Some(MarkdownBlock::Text(new_markup)), Some(last_widget)) =
+        (new_blocks.last(), blocks_box.last_child())
+        && let Ok(label) = last_widget.downcast::<gtk::Label>()
+    {
+        apply_markup_to_label(&label, new_markup);
+        return true;
+    }
+    false
+}
+
+fn try_update_last_code(
+    blocks_box: &gtk::Box,
+    new_blocks: &[MarkdownBlock],
+    is_dark: bool,
+) -> bool {
+    if let (
+        Some(MarkdownBlock::Code {
+            light_pango_markup,
+            dark_pango_markup,
+            ..
+        }),
+        Some(last_widget),
+    ) = (new_blocks.last(), blocks_box.last_child())
+        && let Some(code_box) = last_widget.downcast_ref::<gtk::Box>()
+        && let Some(scroller) = code_box.last_child().and_downcast::<gtk::ScrolledWindow>()
+        && let Some(code_label) = scroller.child().and_downcast::<gtk::Label>()
+    {
+        code_label.set_markup(if is_dark {
+            dark_pango_markup
+        } else {
+            light_pango_markup
+        });
+        return true;
+    }
+    false
 }
 
 fn replace_tail(
@@ -218,37 +235,14 @@ fn build_markdown_table(headers: &[String], rows: &[Vec<String>]) -> gtk::Scroll
         .column_spacing(0)
         .row_spacing(0)
         .build();
-
     for (col_idx, header) in headers.iter().enumerate() {
-        let cell = build_markup_label(header);
-        cell.set_margin_top(8);
-        cell.set_margin_bottom(8);
-        cell.set_margin_start(12);
-        cell.set_margin_end(12);
-        cell.add_css_class("heading");
-        let wrapper = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .css_classes(["markdown-table-header"])
-            .build();
-        wrapper.append(&cell);
-        grid.attach(&wrapper, col_idx as i32, 0, 1, 1);
+        grid.attach(&build_table_cell(header, true), col_idx as i32, 0, 1, 1);
     }
-
     let row_offset = if headers.is_empty() { 0 } else { 1 };
     for (row_idx, row) in rows.iter().enumerate() {
         for (col_idx, cell_markup) in row.iter().enumerate() {
-            let cell = build_markup_label(cell_markup);
-            cell.set_margin_top(6);
-            cell.set_margin_bottom(6);
-            cell.set_margin_start(12);
-            cell.set_margin_end(12);
-            let wrapper = gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .css_classes(["markdown-table-cell"])
-                .build();
-            wrapper.append(&cell);
             grid.attach(
-                &wrapper,
+                &build_table_cell(cell_markup, false),
                 col_idx as i32,
                 (row_idx + row_offset) as i32,
                 1,
@@ -256,7 +250,6 @@ fn build_markdown_table(headers: &[String], rows: &[Vec<String>]) -> gtk::Scroll
             );
         }
     }
-
     gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vscrollbar_policy(gtk::PolicyType::Never)
@@ -265,41 +258,34 @@ fn build_markdown_table(headers: &[String], rows: &[Vec<String>]) -> gtk::Scroll
         .build()
 }
 
-fn build_code_block(language: Option<&str>, raw_code: &str, pango_markup: &str) -> gtk::Box {
+fn build_table_cell(markup: &str, is_header: bool) -> gtk::Box {
+    let cell = build_markup_label(markup);
+    let v_pad = if is_header { 8 } else { 6 };
+    cell.set_margin_top(v_pad);
+    cell.set_margin_bottom(v_pad);
+    cell.set_margin_start(12);
+    cell.set_margin_end(12);
+    if is_header {
+        cell.add_css_class("heading");
+    }
+    let wrapper = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes([if is_header {
+            "markdown-table-header"
+        } else {
+            "markdown-table-cell"
+        }])
+        .build();
+    wrapper.append(&cell);
+    wrapper
+}
+
+fn build_code_block(language: Option<&str>, _raw_code: &str, pango_markup: &str) -> gtk::Box {
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .css_classes(["code-card"])
         .build();
-
-    let header = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(14)
-        .margin_end(8)
-        .build();
-
-    let lang_label = gtk::Label::builder()
-        .label(format_code_language(language))
-        .xalign(0.0)
-        .hexpand(true)
-        .css_classes(["caption-heading", "dim-label"])
-        .build();
-
-    let copy_btn = gtk::Button::builder()
-        .icon_name("edit-copy-symbolic")
-        .tooltip_text(gettext("Copy code"))
-        .css_classes(["flat", "circular"])
-        .build();
-    {
-        let code_owned = raw_code.to_string();
-        copy_btn.connect_clicked(move |btn| {
-            copy_text_with_feedback(btn, &code_owned);
-        });
-    }
-
-    header.append(&lang_label);
-    header.append(&copy_btn);
+    let (header, copy_btn) = build_code_header(language);
     container.append(&header);
     container.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
@@ -314,15 +300,42 @@ fn build_code_block(language: Option<&str>, raw_code: &str, pango_markup: &str) 
         .css_classes(["monospace"])
         .build();
     code_label.set_markup(pango_markup);
-
+    let label_ref = code_label.clone();
+    copy_btn.connect_clicked(move |btn| {
+        // Reading `label_ref.text()` reads the latest rendered code even after streaming updates.
+        copy_text_with_feedback(btn, &label_ref.text());
+    });
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vscrollbar_policy(gtk::PolicyType::Never)
         .child(&code_label)
         .build();
-
     container.append(&scroller);
     container
+}
+
+fn build_code_header(language: Option<&str>) -> (gtk::Box, gtk::Button) {
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(14)
+        .margin_end(8)
+        .build();
+    let lang_label = gtk::Label::builder()
+        .label(format_code_language(language))
+        .xalign(0.0)
+        .hexpand(true)
+        .css_classes(["caption-heading", "dim-label"])
+        .build();
+    let copy_btn = gtk::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text(gettext("Copy code"))
+        .css_classes(["flat", "circular"])
+        .build();
+    header.append(&lang_label);
+    header.append(&copy_btn);
+    (header, copy_btn)
 }
 
 #[cfg(test)]
@@ -339,51 +352,45 @@ mod tests {
     }
 
     #[test]
-    fn skips_when_blocks_and_theme_match() {
-        let blocks = vec![
+    fn skips_matching_blocks_and_rebuilds_on_theme_flip() {
+        let b = [
             MarkdownBlock::Text("hi".into()),
             code_block("rust", "fn main() {}"),
         ];
         assert_eq!(
-            plan_block_update(&blocks, true, &blocks, true, false),
+            plan_block_update(&b, true, &b, true, false),
             BlockUpdatePlan::Skip
         );
-    }
-
-    #[test]
-    fn rebuilds_all_when_theme_flips_even_with_identical_blocks() {
-        let blocks = vec![
-            MarkdownBlock::Text("hi".into()),
-            code_block("rust", "fn main() {}"),
-        ];
         assert_eq!(
-            plan_block_update(&blocks, true, &blocks, false, false),
+            plan_block_update(&b, true, &b, false, false),
             BlockUpdatePlan::RebuildAll
         );
         assert_eq!(
-            plan_block_update(&blocks, false, &blocks, true, true),
+            plan_block_update(&b, false, &b, true, true),
             BlockUpdatePlan::RebuildAll
         );
     }
 
     #[test]
     fn fast_paths_streaming_text_and_code_updates() {
-        let prev_text = vec![MarkdownBlock::Text("hel".into())];
-        let next_text = vec![MarkdownBlock::Text("hello".into())];
+        let (pt, nt) = (
+            [MarkdownBlock::Text("hel".into())],
+            [MarkdownBlock::Text("hello".into())],
+        );
         assert_eq!(
-            plan_block_update(&prev_text, false, &next_text, false, true),
+            plan_block_update(&pt, false, &nt, false, true),
             BlockUpdatePlan::UpdateLastText
         );
-
-        let prev_code = vec![code_block("rust", "let x = 1;")];
-        let next_code = vec![code_block("rust", "let x = 1;\nlet y = 2;")];
+        let (pc, nc) = (
+            [code_block("rust", "let x = 1;")],
+            [code_block("rust", "let x = 1;\nlet y = 2;")],
+        );
         assert_eq!(
-            plan_block_update(&prev_code, true, &next_code, true, true),
+            plan_block_update(&pc, true, &nc, true, true),
             BlockUpdatePlan::UpdateLastCode
         );
-        // Non-streaming or language change replaces the tail instead of in-place code label update.
         assert_eq!(
-            plan_block_update(&prev_code, true, &next_code, true, false),
+            plan_block_update(&pc, true, &nc, true, false),
             BlockUpdatePlan::ReplaceTail(0)
         );
     }

@@ -74,6 +74,14 @@ impl TableBuilder {
     }
 
     pub(super) fn finish(mut self) -> Option<MarkdownBlock> {
+        if self.in_cell {
+            let cell = self.cell_buf.trim();
+            if !cell.is_empty() {
+                self.current_row.push(cell.to_string());
+            }
+            self.cell_buf.clear();
+            self.in_cell = false;
+        }
         if !self.current_row.is_empty() {
             self.rows.push(self.current_row);
         }

@@ -1,0 +1,20 @@
+[package]
+name = "companion-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+companion-core.workspace = true
+anyhow.workspace = true
+pdf-extract.workspace = true
+pulldown-cmark.workspace = true
+syntect.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

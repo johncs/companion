@@ -1,16 +1,18 @@
 //! Sidebar component: live FTS5 search, chat list, and header actions.
 
 mod actions;
+mod view_model;
 mod widgets;
 
-use std::collections::HashSet;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::glib;
 use relm4::prelude::*;
 
 use crate::i18n::gettext;
-use crate::storage::Database;
+use crate::services::AppServices;
+use crate::storage::Conversation;
 use crate::ui::sidebar_rows::{build_conversation_row, new_nav_list};
 use crate::ui::widgets::clear_list_box;
 
@@ -67,13 +69,12 @@ pub enum SidebarOutput {
 }
 
 pub struct SidebarModel {
-    db: Database,
+    services: Arc<AppServices>,
     search_query: String,
     search_debounce: Option<glib::SourceId>,
-    search_seq: u64,
     list_seq: u64,
     active_conversation_id: Option<String>,
-    running_conversations: HashSet<String>,
+    vm: view_model::SidebarViewModel,
     chats_list: gtk::ListBox,
     search_list: gtk::ListBox,
     search_section: gtk::Box,
@@ -81,7 +82,7 @@ pub struct SidebarModel {
 
 #[relm4::component(pub)]
 impl SimpleComponent for SidebarModel {
-    type Init = Database;
+    type Init = Arc<AppServices>;
     type Input = SidebarMsg;
     type Output = SidebarOutput;
 
@@ -152,69 +153,40 @@ impl SimpleComponent for SidebarModel {
     }
 
     fn init(
-        db: Self::Init,
+        services: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let chats_list = new_nav_list();
         let search_list = new_nav_list();
+        connect_list_activation(&[&chats_list, &search_list], &sender);
         let search_section = build_section_box(&gettext("Search Results"), &search_list);
 
         let widgets = view_output!();
-        widgets.search_bar.connect_entry(&widgets.search_entry);
-        widgets
-            .search_bar
-            .bind_property("search-mode-enabled", &widgets.search_toggle, "active")
-            .bidirectional()
-            .sync_create()
-            .build();
-        {
-            let entry = widgets.search_entry.clone();
-            widgets
-                .search_bar
-                .connect_search_mode_enabled_notify(move |bar| {
-                    if !bar.is_search_mode() && !entry.text().is_empty() {
-                        entry.set_text("");
-                    }
-                });
-        }
+        connect_search_bar(
+            &widgets.search_bar,
+            &widgets.search_entry,
+            &widgets.search_toggle,
+        );
 
         let mut model = Self {
-            db,
+            services,
             search_query: String::new(),
             search_debounce: None,
-            search_seq: 0,
             list_seq: 0,
             active_conversation_id: None,
-            running_conversations: HashSet::new(),
+            vm: view_model::SidebarViewModel::default(),
             chats_list,
             search_list,
             search_section,
         };
         model.rebuild_lists(&sender);
-
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
-            SidebarMsg::SearchChanged(query) => {
-                self.search_query = query;
-                if let Some(source_id) = self.search_debounce.take() {
-                    source_id.remove();
-                }
-                if self.search_query.trim().is_empty() {
-                    self.rebuild_lists(&sender);
-                } else {
-                    let sender_clone = sender.clone();
-                    self.search_debounce = Some(glib::timeout_add_local_once(
-                        std::time::Duration::from_millis(150),
-                        move || {
-                            sender_clone.input(SidebarMsg::ApplySearch);
-                        },
-                    ));
-                }
-            }
+            SidebarMsg::SearchChanged(query) => self.on_search_changed(query, &sender),
             SidebarMsg::ApplySearch => {
                 self.search_debounce = None;
                 self.rebuild_lists(&sender);
@@ -223,35 +195,7 @@ impl SimpleComponent for SidebarModel {
                 request_seq,
                 result,
             } => {
-                if self.search_seq != request_seq || self.search_query.trim().is_empty() {
-                    return;
-                }
-                clear_list_box(&self.search_list);
-                match result {
-                    Ok(convs) if convs.is_empty() => {
-                        self.search_list.append(&build_sidebar_empty_row(&gettext(
-                            "No matching conversations",
-                        )));
-                    }
-                    Ok(convs) => {
-                        for conv in convs {
-                            let is_active =
-                                self.active_conversation_id.as_deref() == Some(&conv.id);
-                            let is_running = self.running_conversations.contains(&conv.id);
-                            self.search_list.append(&build_conversation_row(
-                                &conv, is_active, is_running, &sender,
-                            ));
-                        }
-                    }
-                    Err(err) => {
-                        tracing::error!("Search failed: {err}");
-                        let sender_clone = sender.clone();
-                        self.search_list.append(&build_sidebar_error_row(
-                            &gettext("Failed to search chats"),
-                            move || sender_clone.input(SidebarMsg::ApplySearch),
-                        ));
-                    }
-                }
+                self.on_search_results_loaded(request_seq, result, &sender);
             }
             SidebarMsg::NewChat => self.on_new_chat(&sender),
             SidebarMsg::ChatCreated(res) => self.on_chat_created(res, &sender),
@@ -261,43 +205,112 @@ impl SimpleComponent for SidebarModel {
                 let _ = sender.output(SidebarOutput::ConversationSelected(conv_id));
             }
             SidebarMsg::RenameConversation { id, title } => {
-                self.on_rename_conversation(id, title, &sender);
+                self.on_rename_conversation(id, title, &sender)
             }
             SidebarMsg::ChatRenamed { id, title, result } => {
-                self.on_chat_renamed(id, title, result, &sender);
+                self.on_chat_renamed(id, title, result, &sender)
             }
             SidebarMsg::DuplicateConversation(conv_id) => {
-                self.on_duplicate_conversation(conv_id, &sender);
+                self.on_duplicate_conversation(conv_id, &sender)
             }
             SidebarMsg::ChatDuplicated(res) => self.on_chat_duplicated(res, &sender),
             SidebarMsg::DeleteConversation(conv_id) => {
-                self.on_delete_conversation(conv_id, &sender);
+                self.on_delete_conversation(conv_id, &sender)
             }
-            SidebarMsg::ChatDeleted { id, result } => {
-                self.on_chat_deleted(id, result, &sender);
-            }
+            SidebarMsg::ChatDeleted { id, result } => self.on_chat_deleted(id, result, &sender),
             SidebarMsg::ChatsLoaded {
                 request_seq,
                 result,
             } => self.on_chats_loaded(request_seq, result, &sender),
             SidebarMsg::SetConversationRunning { id, is_running } => {
-                let changed = if is_running {
-                    self.running_conversations.insert(id)
-                } else {
-                    self.running_conversations.remove(&id)
-                };
-                if changed {
+                if self.vm.set_running(id, is_running) {
                     self.rebuild_lists(&sender);
                 }
             }
-            SidebarMsg::RefreshLists => {
-                self.rebuild_lists(&sender);
+            SidebarMsg::RefreshLists => self.rebuild_lists(&sender),
+            SidebarMsg::OpenSettings => drop(sender.output(SidebarOutput::OpenSettings)),
+        }
+    }
+}
+
+impl SidebarModel {
+    fn on_search_changed(&mut self, query: String, sender: &ComponentSender<Self>) {
+        self.search_query = query;
+        if let Some(source_id) = self.search_debounce.take() {
+            source_id.remove();
+        }
+        if self.search_query.trim().is_empty() {
+            self.rebuild_lists(sender);
+        } else {
+            let sender_clone = sender.clone();
+            self.search_debounce = Some(glib::timeout_add_local_once(
+                std::time::Duration::from_millis(150),
+                move || sender_clone.input(SidebarMsg::ApplySearch),
+            ));
+        }
+    }
+
+    fn on_search_results_loaded(
+        &self,
+        request_seq: u64,
+        result: Result<Vec<Conversation>, String>,
+        sender: &ComponentSender<Self>,
+    ) {
+        if !self.vm.is_current_search(request_seq) || self.search_query.trim().is_empty() {
+            return;
+        }
+        clear_list_box(&self.search_list);
+        match result {
+            Ok(convs) if convs.is_empty() => {
+                self.search_list.append(&build_sidebar_empty_row(&gettext(
+                    "No matching conversations",
+                )));
             }
-            SidebarMsg::OpenSettings => {
-                let _ = sender.output(SidebarOutput::OpenSettings);
+            Ok(convs) => {
+                for conv in convs {
+                    let is_active = self.active_conversation_id.as_deref() == Some(&conv.id);
+                    let is_running = self.vm.running_conversations.contains(&conv.id);
+                    self.search_list.append(&build_conversation_row(
+                        &conv, is_active, is_running, sender,
+                    ));
+                }
+            }
+            Err(err) => {
+                tracing::error!("Search failed: {err}");
+                let sender_clone = sender.clone();
+                self.search_list.append(&build_sidebar_error_row(
+                    &gettext("Failed to search chats"),
+                    move || sender_clone.input(SidebarMsg::ApplySearch),
+                ));
             }
         }
     }
+}
+
+fn connect_list_activation(lists: &[&gtk::ListBox], sender: &ComponentSender<SidebarModel>) {
+    for list in lists {
+        let sender = sender.clone();
+        list.connect_row_activated(move |_, row| {
+            let conv_id = row.widget_name();
+            if !conv_id.is_empty() {
+                sender.input(SidebarMsg::SelectConversation(conv_id.to_string()));
+            }
+        });
+    }
+}
+
+fn connect_search_bar(bar: &gtk::SearchBar, entry: &gtk::SearchEntry, toggle: &gtk::ToggleButton) {
+    bar.connect_entry(entry);
+    bar.bind_property("search-mode-enabled", toggle, "active")
+        .bidirectional()
+        .sync_create()
+        .build();
+    let entry_c = entry.clone();
+    bar.connect_search_mode_enabled_notify(move |bar| {
+        if !bar.is_search_mode() && !entry_c.text().is_empty() {
+            entry_c.set_text("");
+        }
+    });
 }
 
 impl SidebarModel {
@@ -324,13 +337,12 @@ impl SidebarModel {
         self.search_list
             .append(&build_sidebar_loading_row(&gettext("Searching…")));
 
-        self.search_seq = self.search_seq.wrapping_add(1);
-        let req_seq = self.search_seq;
-        let db = self.db.clone();
+        let req_seq = self.vm.begin_search(query.to_string());
+        let db = self.services.db.clone();
         let query_owned = query.to_string();
         let input_sender = sender.input_sender().clone();
 
-        crate::core::runtime().spawn_blocking(move || {
+        self.services.rt_handle.spawn_blocking(move || {
             let result = db
                 .search_conversations(&query_owned, 50)
                 .map_err(|e| e.to_string());
@@ -344,10 +356,10 @@ impl SidebarModel {
     fn populate_chats(&mut self, sender: &ComponentSender<Self>) {
         self.list_seq = self.list_seq.wrapping_add(1);
         let req_seq = self.list_seq;
-        let db = self.db.clone();
+        let db = self.services.db.clone();
         let input_sender = sender.input_sender().clone();
 
-        crate::core::runtime().spawn_blocking(move || {
+        self.services.rt_handle.spawn_blocking(move || {
             let result = db.list_conversations(100).map_err(|e| e.to_string());
             let _ = input_sender.send(SidebarMsg::ChatsLoaded {
                 request_seq: req_seq,

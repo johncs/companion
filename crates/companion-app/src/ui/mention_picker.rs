@@ -1,7 +1,6 @@
 //! Cursor-anchored `@`-mention autocomplete popover for granted files.
 
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -9,9 +8,16 @@ use gtk::{gdk, glib};
 
 const MAX_MENTION_RESULTS: usize = 20;
 
+/// Pre-indexed file or directory candidate for `@`-mention autocomplete (zero `stat()` on keystrokes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionEntry {
+    pub path: String,
+    pub is_dir: bool,
+}
+
 struct MentionState {
-    granted_files: Vec<String>,
-    matches: Vec<String>,
+    granted_files: Vec<MentionEntry>,
+    matches: Vec<MentionEntry>,
     start_offset: Option<i32>,
 }
 
@@ -27,31 +33,7 @@ pub struct MentionPicker {
 impl MentionPicker {
     /// Attach a cursor-anchored `@`-mention popover to `text_view`.
     pub fn attach(text_view: &gtk::TextView) -> Self {
-        let list_box = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::Single)
-            .css_classes(["navigation-sidebar"])
-            .build();
-
-        let scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .propagate_natural_height(true)
-            .propagate_natural_width(true)
-            .min_content_width(360)
-            .max_content_width(560)
-            .max_content_height(240)
-            .child(&list_box)
-            .build();
-
-        let popover = gtk::Popover::builder()
-            .autohide(false)
-            .can_focus(false)
-            .has_arrow(true)
-            .position(gtk::PositionType::Top)
-            .child(&scroller)
-            .build();
-        popover.set_parent(text_view);
-
+        let (list_box, popover) = build_mention_popover(text_view);
         let picker = Self {
             text_view: text_view.clone(),
             popover,
@@ -62,17 +44,25 @@ impl MentionPicker {
                 start_offset: None,
             })),
         };
-
         let picker_row = picker.clone();
-        picker.list_box.connect_row_activated(move |_, row| {
+        let activated_id = picker.list_box.connect_row_activated(move |_, row| {
             picker_row.accept_at(row.index().max(0) as usize);
         });
-
+        // `list_box -> closure -> picker -> list_box` would otherwise be a strong cycle; break it
+        // (and detach the popover) when the owning text view is destroyed.
+        let (popover_destroy, list_box_destroy) = (picker.popover.clone(), picker.list_box.clone());
+        let activated_id = std::cell::RefCell::new(Some(activated_id));
+        text_view.connect_destroy(move |_| {
+            if let Some(id) = activated_id.borrow_mut().take() {
+                list_box_destroy.disconnect(id);
+            }
+            popover_destroy.unparent();
+        });
         picker
     }
 
     /// Replace the cached project file list and refresh if the popover is open.
-    pub fn set_files(&self, files: Vec<String>) {
+    pub fn set_files(&self, files: Vec<MentionEntry>) {
         self.state.borrow_mut().granted_files = files;
         if self.popover.is_visible() {
             self.update_from_buffer();
@@ -99,21 +89,7 @@ impl MentionPicker {
         let start_iter = buf.start_iter();
         let before_cursor = buf.text(&start_iter, &cursor_iter, false);
 
-        let (start_offset, matches) = {
-            let st = self.state.borrow();
-            if st.granted_files.is_empty() {
-                (None, Vec::new())
-            } else if let Some((offset, query)) = extract_mention_query(&before_cursor) {
-                (
-                    Some(offset),
-                    filter_mention_matches(&st.granted_files, query),
-                )
-            } else {
-                (None, Vec::new())
-            }
-        };
-
-        let (Some(start_offset), matches) = (start_offset, matches) else {
+        let (Some(start_offset), matches) = self.compute_matches(&before_cursor) else {
             self.dismiss();
             return;
         };
@@ -121,53 +97,14 @@ impl MentionPicker {
             self.dismiss();
             return;
         }
-
-        let matches_unchanged = self.state.borrow().matches == matches;
-        if !matches_unchanged {
-            while let Some(child) = self.list_box.first_child() {
-                self.list_box.remove(&child);
-            }
-            for path in &matches {
-                let row_box = gtk::Box::builder()
-                    .orientation(gtk::Orientation::Horizontal)
-                    .spacing(8)
-                    .margin_top(6)
-                    .margin_bottom(6)
-                    .margin_start(8)
-                    .margin_end(8)
-                    .build();
-                let icon_name = if Path::new(path).is_dir() {
-                    "folder-symbolic"
-                } else {
-                    "text-x-generic-symbolic"
-                };
-                let icon = gtk::Image::from_icon_name(icon_name);
-                icon.add_css_class("dim-label");
-                let label = gtk::Label::builder()
-                    .label(path)
-                    .xalign(0.0)
-                    .hexpand(true)
-                    .max_width_chars(60)
-                    .ellipsize(gtk::pango::EllipsizeMode::Start)
-                    .tooltip_text(path)
-                    .css_classes(["monospace", "caption"])
-                    .build();
-                row_box.append(&icon);
-                row_box.append(&label);
-                self.list_box.append(&row_box);
-            }
-
-            if let Some(first_row) = self.list_box.row_at_index(0) {
-                self.list_box.select_row(Some(&first_row));
-            }
+        if self.state.borrow().matches != matches {
+            rebuild_mention_rows(&self.list_box, &matches);
         }
-
         {
             let mut st = self.state.borrow_mut();
             st.matches = matches;
             st.start_offset = Some(start_offset);
         }
-
         let loc = self.text_view.iter_location(&cursor_iter);
         let (wx, wy) =
             self.text_view
@@ -179,6 +116,86 @@ impl MentionPicker {
         }
     }
 
+    fn compute_matches(&self, before_cursor: &str) -> (Option<i32>, Vec<MentionEntry>) {
+        let st = self.state.borrow();
+        if st.granted_files.is_empty() {
+            return (None, Vec::new());
+        }
+        if let Some((offset, query)) = extract_mention_query(before_cursor) {
+            (
+                Some(offset),
+                filter_mention_entries(&st.granted_files, query),
+            )
+        } else {
+            (None, Vec::new())
+        }
+    }
+}
+
+fn build_mention_popover(text_view: &gtk::TextView) -> (gtk::ListBox, gtk::Popover) {
+    let list_box = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .css_classes(["navigation-sidebar"])
+        .build();
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_height(true)
+        .propagate_natural_width(true)
+        .min_content_width(360)
+        .max_content_width(560)
+        .max_content_height(240)
+        .child(&list_box)
+        .build();
+    let popover = gtk::Popover::builder()
+        .autohide(false)
+        .can_focus(false)
+        .has_arrow(true)
+        .position(gtk::PositionType::Top)
+        .child(&scroller)
+        .build();
+    popover.set_parent(text_view);
+    (list_box, popover)
+}
+
+fn rebuild_mention_rows(list_box: &gtk::ListBox, matches: &[MentionEntry]) {
+    while let Some(child) = list_box.first_child() {
+        list_box.remove(&child);
+    }
+    for entry in matches {
+        let row_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(8)
+            .margin_end(8)
+            .build();
+        let icon = gtk::Image::from_icon_name(if entry.is_dir {
+            "folder-symbolic"
+        } else {
+            "text-x-generic-symbolic"
+        });
+        icon.add_css_class("dim-label");
+        let label = gtk::Label::builder()
+            .label(&entry.path)
+            .xalign(0.0)
+            .hexpand(true)
+            .max_width_chars(60)
+            .ellipsize(gtk::pango::EllipsizeMode::Start)
+            .tooltip_text(&entry.path)
+            .css_classes(["monospace", "caption"])
+            .build();
+        row_box.append(&icon);
+        row_box.append(&label);
+        list_box.append(&row_box);
+    }
+    if let Some(first_row) = list_box.row_at_index(0) {
+        list_box.select_row(Some(&first_row));
+    }
+}
+
+impl MentionPicker {
     /// Handle navigation/acceptance keys when the popover is open.
     /// Returns `Some(Propagation::Stop)` if consumed by the picker.
     pub fn handle_key(&self, key: gdk::Key) -> Option<glib::Propagation> {
@@ -228,7 +245,10 @@ impl MentionPicker {
     fn accept_at(&self, index: usize) {
         let (path, start_offset) = {
             let st = self.state.borrow();
-            (st.matches.get(index).cloned(), st.start_offset)
+            (
+                st.matches.get(index).map(|m| m.path.clone()),
+                st.start_offset,
+            )
         };
         let (Some(path), Some(start_offset)) = (path, start_offset) else {
             self.dismiss();
@@ -263,34 +283,43 @@ pub fn extract_mention_query(before_cursor: &str) -> Option<(i32, &str)> {
     Some((prefix.chars().count() as i32, query))
 }
 
-/// Filter and rank project file paths for a case-insensitive `@query`.
-pub fn filter_mention_matches(files: &[String], query: &str) -> Vec<String> {
+fn mention_rank(path: &str, query_lower: &str) -> u8 {
+    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    if name.starts_with(query_lower) {
+        0
+    } else if name.contains(query_lower) {
+        1
+    } else {
+        2
+    }
+}
+
+/// Filter and rank pre-indexed [`MentionEntry`] items without performing filesystem `stat()` calls.
+pub fn filter_mention_entries(files: &[MentionEntry], query: &str) -> Vec<MentionEntry> {
     let query_lower = query.to_lowercase();
-    let mut matches: Vec<String> = files
+    let mut matches: Vec<MentionEntry> = files
         .iter()
-        .filter(|f| query_lower.is_empty() || f.to_lowercase().contains(&query_lower))
-        .take(MAX_MENTION_RESULTS)
+        .filter(|e| query_lower.is_empty() || e.path.to_lowercase().contains(&query_lower))
         .cloned()
         .collect();
 
     if !query_lower.is_empty() {
-        matches.sort_by_key(|p| {
-            let name = p.rsplit('/').next().unwrap_or(p).to_lowercase();
-            if name.starts_with(&query_lower) {
-                0
-            } else if name.contains(&query_lower) {
-                1
-            } else {
-                2
-            }
-        });
+        matches.sort_by_key(|e| mention_rank(&e.path, &query_lower));
     }
+    matches.truncate(MAX_MENTION_RESULTS);
     matches
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(path: &str) -> MentionEntry {
+        MentionEntry {
+            path: path.to_string(),
+            is_dir: false,
+        }
+    }
 
     #[test]
     fn extracts_only_valid_at_mentions() {
@@ -303,11 +332,26 @@ mod tests {
     #[test]
     fn ranks_filename_prefix_matches_first() {
         let files = vec![
-            "docs/readme.md".to_string(),
-            "src/ui/window.rs".to_string(),
-            "window_notes.txt".to_string(),
+            entry("docs/readme.md"),
+            entry("src/ui/window.rs"),
+            entry("window_notes.txt"),
         ];
-        let matches = filter_mention_matches(&files, "win");
+        let matches: Vec<String> = filter_mention_entries(&files, "win")
+            .into_iter()
+            .map(|m| m.path)
+            .collect();
         assert_eq!(matches, vec!["src/ui/window.rs", "window_notes.txt"]);
+    }
+
+    #[test]
+    fn ranks_before_truncating_when_many_candidates() {
+        // 40 weak (directory-only) matches precede the one strong filename-prefix match.
+        let mut files: Vec<MentionEntry> = (0..40)
+            .map(|i| entry(&format!("win_dir/sub{i}/file.txt")))
+            .collect();
+        files.push(entry("src/window.rs"));
+        let matches = filter_mention_entries(&files, "win");
+        assert_eq!(matches.len(), MAX_MENTION_RESULTS);
+        assert_eq!(matches[0].path, "src/window.rs");
     }
 }

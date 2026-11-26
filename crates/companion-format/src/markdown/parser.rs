@@ -99,10 +99,12 @@ impl<'a> MarkdownBuilder<'a> {
                 let finished = std::mem::replace(&mut self.state, BlockState::Normal);
                 if let BlockState::Code(cb) = finished {
                     let slice = self.input.get(range.start..range.end).unwrap_or("");
+                    let trimmed = slice.trim_end();
+                    let is_opening_only = trimmed == "```" || trimmed == "~~~";
                     let is_unclosed_eof = self.skip_unclosed_highlight
                         && range.end == self.input.len()
-                        && !slice.trim_end().ends_with("```")
-                        && !slice.trim_end().ends_with("~~~");
+                        && (is_opening_only
+                            || (!trimmed.ends_with("```") && !trimmed.ends_with("~~~")));
                     let raw = cb.buf.trim_end_matches('\n').to_string();
                     let block = self.build_code_block(cb.language, raw, is_unclosed_eof);
                     self.blocks.push(block);
@@ -125,7 +127,7 @@ impl<'a> MarkdownBuilder<'a> {
     fn handle_container_event(&mut self, event: &Event<'_>) -> bool {
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
-                self.flush_normal_text();
+                self.flush_active_text_or_quote();
                 let language = match kind {
                     CodeBlockKind::Fenced(lang) => {
                         let l = lang.split_whitespace().next().unwrap_or("").trim();
@@ -140,7 +142,7 @@ impl<'a> MarkdownBuilder<'a> {
                 true
             }
             Event::Start(Tag::Table(_)) => {
-                self.flush_normal_text();
+                self.flush_active_text_or_quote();
                 self.state = BlockState::Table(TableBuilder::default());
                 true
             }
@@ -158,13 +160,28 @@ impl<'a> MarkdownBuilder<'a> {
             }
             Event::End(TagEnd::BlockQuote(_)) => self.end_quote(),
             Event::Rule if !matches!(self.state, BlockState::Table(_)) => {
-                self.flush_normal_text();
+                self.flush_active_text_or_quote();
                 self.blocks.push(MarkdownBlock::Rule);
                 true
             }
             Event::Start(Tag::Paragraph) => true,
             Event::End(TagEnd::Paragraph) => self.end_paragraph(),
             _ => false,
+        }
+    }
+
+    fn flush_active_text_or_quote(&mut self) {
+        if let BlockState::Quote { .. } = self.state {
+            let prev = std::mem::replace(&mut self.state, BlockState::Normal);
+            if let BlockState::Quote { mut buf, .. } = prev {
+                self.inline.close_all(&mut buf);
+                let trimmed = buf.trim();
+                if !trimmed.is_empty() {
+                    self.blocks.push(MarkdownBlock::Quote(trimmed.to_string()));
+                }
+            }
+        } else {
+            self.flush_normal_text();
         }
     }
 
@@ -233,16 +250,14 @@ impl<'a> MarkdownBuilder<'a> {
         let (light_pango_markup, dark_pango_markup) = if skip_highlight {
             let escaped = escape_pango_markup(&code);
             (escaped.clone(), escaped)
+        } else if let Some((light, dark)) = self.cache.get(language.as_deref(), &code) {
+            (light.to_string(), dark.to_string())
         } else {
-            let key = (language.clone(), code.clone());
-            if let Some(cached) = self.cache.get(&key) {
-                cached.clone()
-            } else {
-                let light = highlight_code_pango(&code, language.as_deref(), "InspiredGitHub");
-                let dark = highlight_code_pango(&code, language.as_deref(), "base16-ocean.dark");
-                self.cache.insert(key, (light.clone(), dark.clone()));
-                (light, dark)
-            }
+            let light = highlight_code_pango(&code, language.as_deref(), "InspiredGitHub");
+            let dark = highlight_code_pango(&code, language.as_deref(), "base16-ocean.dark");
+            self.cache
+                .insert(language.as_deref(), &code, light.clone(), dark.clone());
+            (light, dark)
         };
         MarkdownBlock::Code {
             language,

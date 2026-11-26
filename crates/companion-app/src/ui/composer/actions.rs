@@ -1,14 +1,83 @@
 //! Composer message action handlers (`SendPressed`, `AttachmentLoaded`, `ControlsApplied`).
 
+use std::path::PathBuf;
+
 use adw::prelude::*;
 use relm4::prelude::*;
 
 use crate::core::ThinkingLevel;
+use crate::core::types::{SearchEngine, StagedAttachment};
 use crate::i18n::gettext;
-use crate::storage::AttachmentRecord;
+use crate::storage::{ConversationFolder, ModelRecord};
+use crate::ui::mention_picker::MentionEntry;
 
+use super::ComposerModel;
 use super::attachments::rebuild_chips_box;
-use super::{ComposerModel, ComposerMsg, ComposerOutput};
+
+#[derive(Debug)]
+pub enum ComposerMsg {
+    SendPressed,
+    StopPressed,
+    AttachPressed,
+    FilesDropped(Vec<PathBuf>),
+    PathsClassified {
+        dirs: Vec<PathBuf>,
+        files: Vec<PathBuf>,
+    },
+    AttachmentLoaded {
+        temp_id: String,
+        result: Result<StagedAttachment, String>,
+    },
+    RemoveAttachment(String),
+    OpenFolderPermissions,
+    ToggleWebSearch,
+    SetWebSearchEnabled(bool),
+    SetWebSearchGlobalEnabled(bool),
+    SetGrantedFolders(Vec<ConversationFolder>),
+    GrantedFilesLoaded {
+        seq: u64,
+        files: Vec<MentionEntry>,
+    },
+    InitDataLoaded {
+        assistant_name: String,
+        web_search_global_enabled: bool,
+        search_engine: SearchEngine,
+        models: Vec<ModelRecord>,
+    },
+    ModelsMetadataLoaded(Vec<ModelRecord>),
+    SearchEngineLoaded(SearchEngine),
+    OpenChatControls,
+    ControlsApplied {
+        thinking_level: ThinkingLevel,
+        system_prompt: String,
+        context_length: u32,
+    },
+    OpenModelSettings,
+    RefreshModels(Option<String>),
+    SetSystemPrompt(String),
+    SetThinkingLevel(ThinkingLevel),
+    SetAssistantName(String),
+    SetContextUsed(u32),
+    SetGenerating(bool),
+}
+
+#[derive(Debug)]
+pub enum ComposerOutput {
+    Send {
+        text: String,
+        thinking_level: ThinkingLevel,
+        attachments: Vec<StagedAttachment>,
+    },
+    StopRequested,
+    OpenFolderPermissions,
+    GrantFolder(PathBuf),
+    WebSearchToggled(bool),
+    SystemPromptChanged(String),
+    ThinkingLevelChanged(ThinkingLevel),
+    ModelContextLengthChanged(u32),
+    OpenModelSettings,
+    ShowToast(String),
+}
 
 impl ComposerModel {
     pub(super) fn handle_send_pressed(&mut self, sender: &ComponentSender<Self>) {
@@ -45,7 +114,7 @@ impl ComposerModel {
     pub(super) fn handle_attachment_loaded(
         &mut self,
         temp_id: String,
-        result: Result<AttachmentRecord, String>,
+        result: Result<StagedAttachment, String>,
         sender: &ComponentSender<Self>,
     ) {
         match result {
@@ -73,11 +142,8 @@ impl ComposerModel {
         self.thinking_level = thinking_level;
         self.system_prompt = system_prompt.clone();
 
-        if let Some(mid) = &self.active_model_id
-            && let Ok(Some(mut rec)) = self.db.get_model(mid)
-        {
-            rec.default_params.n_ctx = context_length;
-            let _ = self.db.upsert_model(&rec);
+        if self.active_model_id.is_some() {
+            let _ = sender.output(ComposerOutput::ModelContextLengthChanged(context_length));
         }
 
         self.refresh_controls_button();
@@ -88,5 +154,21 @@ impl ComposerModel {
         if thinking_changed {
             let _ = sender.output(ComposerOutput::ThinkingLevelChanged(thinking_level));
         }
+    }
+
+    pub(super) fn handle_init_data_loaded(
+        &mut self,
+        assistant_name: String,
+        web_search_global_enabled: bool,
+        search_engine: crate::core::types::SearchEngine,
+        models: Vec<crate::storage::ModelRecord>,
+    ) {
+        self.assistant_name = assistant_name;
+        self.web_search_global_enabled = web_search_global_enabled;
+        self.search_engine = search_engine;
+        self.models = models;
+        self.refresh_globe_button();
+        self.refresh_controls_button();
+        self.refresh_attach_button();
     }
 }

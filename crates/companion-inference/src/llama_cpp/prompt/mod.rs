@@ -46,16 +46,23 @@ pub(super) fn format_chat_prompt(
     let mut chat_msgs = Vec::with_capacity(prepared.len());
     for (role, content) in &prepared {
         chat_msgs.push(
-            LlamaChatMessage::new(role.clone(), content.clone())
+            LlamaChatMessage::new(role.as_str().to_string(), content.clone())
                 .map_err(|e| anyhow!("Invalid chat message: {e}"))?,
         );
     }
 
-    if let Some(template) = template.as_ref()
-        && let Ok(raw) = model.apply_chat_template(template, &chat_msgs, true)
-    {
-        return Ok(post_process_template_output(raw, family, thinking_level));
+    if let Some(template) = template.as_ref() {
+        match model.apply_chat_template(template, &chat_msgs, true) {
+            Ok(raw) => return Ok(post_process_template_output(raw, family, thinking_level)),
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to apply model chat template ({err}); falling back to ChatML"
+                );
+            }
+        }
+    } else {
+        tracing::warn!("Model has no embedded chat template; falling back to ChatML");
     }
 
-    Ok(format_chatml_fallback(&prepared, thinking_level))
+    Ok(format_chatml_fallback(&prepared, family, thinking_level))
 }

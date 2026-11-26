@@ -1,19 +1,19 @@
 //! Throttled UI stream coalescer for token bursts and incremental Markdown parsing.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::parser::strip_tool_calls;
-use companion_core::markdown::{
+use companion_core::provider::ChatEvent;
+use companion_format::markdown::{
     CodeHighlightCache, MarkdownBlock, parse_markdown_blocks_streaming,
 };
-use companion_core::provider::ChatEvent;
 
 const STREAM_UI_FLUSH_INTERVAL: Duration = Duration::from_millis(80);
 
 /// Coalesced UI update emitted for a single inference step.
-#[derive(Debug, Clone)]
 pub enum StreamStepUpdate {
     Status(String),
     Snapshot {
@@ -31,6 +31,7 @@ pub enum StreamStepUpdate {
     Done {
         step_answer: String,
         full_reasoning: String,
+        code_cache: CodeHighlightCache,
     },
 }
 
@@ -47,6 +48,7 @@ pub fn combine_answer(prefix: &str, step_answer: &str) -> String {
 pub struct StreamCoalescerState {
     full_answer_prefix: String,
     full_reasoning: String,
+    step_reasoning_started: bool,
     step_answer: String,
     last_combined: String,
     code_cache: CodeHighlightCache,
@@ -60,13 +62,18 @@ pub enum CoalescerAction {
 }
 
 impl StreamCoalescerState {
-    pub fn new(full_answer_prefix: String, full_reasoning: String) -> Self {
+    pub fn new(
+        full_answer_prefix: String,
+        full_reasoning: String,
+        code_cache: CodeHighlightCache,
+    ) -> Self {
         Self {
             full_answer_prefix,
             full_reasoning,
+            step_reasoning_started: false,
             step_answer: String::new(),
             last_combined: String::new(),
-            code_cache: CodeHighlightCache::new(),
+            code_cache,
             dirty: false,
         }
     }
@@ -86,6 +93,13 @@ impl StreamCoalescerState {
                 CoalescerAction::Continue
             }
             ChatEvent::ReasoningToken(r) => {
+                if !self.step_reasoning_started && !self.full_reasoning.is_empty() && !r.is_empty()
+                {
+                    self.full_reasoning.push_str("\n\n");
+                }
+                if !r.is_empty() {
+                    self.step_reasoning_started = true;
+                }
                 self.full_reasoning.push_str(&r);
                 self.dirty = true;
                 CoalescerAction::Continue
@@ -131,85 +145,112 @@ impl StreamCoalescerState {
         let done = StreamStepUpdate::Done {
             step_answer: self.step_answer,
             full_reasoning: self.full_reasoning,
+            code_cache: self.code_cache,
         };
         (trailing, done)
     }
 }
 
-/// Coalesce token bursts and parse streaming Markdown on Tokio with the default 80 ms flush interval.
+/// Coalesce token bursts and parse streaming Markdown on `rt_handle` with the default 80 ms flush interval.
 pub fn spawn_stream_coalescer(
+    rt_handle: &tokio::runtime::Handle,
     raw_rx: mpsc::UnboundedReceiver<ChatEvent>,
     full_answer_prefix: String,
     full_reasoning: String,
+    code_cache: CodeHighlightCache,
 ) -> mpsc::UnboundedReceiver<StreamStepUpdate> {
     spawn_stream_coalescer_with_interval(
+        rt_handle,
         raw_rx,
         full_answer_prefix,
         full_reasoning,
+        code_cache,
         STREAM_UI_FLUSH_INTERVAL,
     )
 }
 
 /// Coalesce token bursts with an explicit `flush_interval` (useful for deterministic tests).
 pub fn spawn_stream_coalescer_with_interval(
-    mut raw_rx: mpsc::UnboundedReceiver<ChatEvent>,
+    rt_handle: &tokio::runtime::Handle,
+    raw_rx: mpsc::UnboundedReceiver<ChatEvent>,
     full_answer_prefix: String,
     full_reasoning: String,
+    code_cache: CodeHighlightCache,
     flush_interval: Duration,
 ) -> mpsc::UnboundedReceiver<StreamStepUpdate> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let mut state = StreamCoalescerState::new(full_answer_prefix, full_reasoning);
-        let mut last_flush = Instant::now();
+    rt_handle.spawn(run_coalescer_loop(
+        raw_rx,
+        ui_tx,
+        StreamCoalescerState::new(full_answer_prefix, full_reasoning, code_cache),
+        flush_interval,
+    ));
+    ui_rx
+}
 
-        loop {
-            let ev_opt = if state.dirty {
-                let deadline = tokio::time::Instant::from_std(last_flush + flush_interval);
-                tokio::select! {
-                    biased;
-                    ev = raw_rx.recv() => Some(ev),
-                    _ = tokio::time::sleep_until(deadline) => None,
-                }
-            } else {
-                Some(raw_rx.recv().await)
-            };
+async fn run_coalescer_loop(
+    mut raw_rx: mpsc::UnboundedReceiver<ChatEvent>,
+    ui_tx: mpsc::UnboundedSender<StreamStepUpdate>,
+    mut state: StreamCoalescerState,
+    flush_interval: Duration,
+) {
+    let mut last_flush = Instant::now();
+    loop {
+        let ev_opt = recv_next_event(&mut raw_rx, state.dirty, last_flush + flush_interval).await;
+        if drain_events(ev_opt, &mut raw_rx, &mut state, &ui_tx) {
+            let (trailing, done) = state.finish();
+            if let Some(snap) = trailing {
+                let _ = ui_tx.send(snap);
+            }
+            let _ = ui_tx.send(done);
+            break;
+        }
+        if state.dirty && last_flush.elapsed() >= flush_interval {
+            let _ = ui_tx.send(state.flush());
+            last_flush = Instant::now();
+        }
+    }
+}
 
-            let mut finished = false;
-            match ev_opt {
-                Some(None) => finished = true,
-                Some(Some(first_ev)) => {
-                    let mut pending = Some(first_ev);
-                    while let Some(ev) = pending.take().or_else(|| raw_rx.try_recv().ok()) {
-                        match state.push_event(ev) {
-                            CoalescerAction::Continue => {}
-                            CoalescerAction::Forward(update) => {
-                                let _ = ui_tx.send(update);
-                            }
-                            CoalescerAction::Finish => {
-                                finished = true;
-                                break;
-                            }
-                        }
+async fn recv_next_event(
+    raw_rx: &mut mpsc::UnboundedReceiver<ChatEvent>,
+    dirty: bool,
+    deadline: Instant,
+) -> Option<Option<ChatEvent>> {
+    if dirty {
+        tokio::select! {
+            biased;
+            ev = raw_rx.recv() => Some(ev),
+            _ = tokio::time::sleep_until(deadline) => None,
+        }
+    } else {
+        Some(raw_rx.recv().await)
+    }
+}
+
+fn drain_events(
+    ev_opt: Option<Option<ChatEvent>>,
+    raw_rx: &mut mpsc::UnboundedReceiver<ChatEvent>,
+    state: &mut StreamCoalescerState,
+    ui_tx: &mpsc::UnboundedSender<StreamStepUpdate>,
+) -> bool {
+    match ev_opt {
+        Some(None) => return true,
+        Some(Some(first_ev)) => {
+            let mut pending = Some(first_ev);
+            while let Some(ev) = pending.take().or_else(|| raw_rx.try_recv().ok()) {
+                match state.push_event(ev) {
+                    CoalescerAction::Continue => {}
+                    CoalescerAction::Forward(update) => {
+                        let _ = ui_tx.send(update);
                     }
+                    CoalescerAction::Finish => return true,
                 }
-                None => {}
-            }
-
-            if finished {
-                let (trailing, done) = state.finish();
-                if let Some(snap) = trailing {
-                    let _ = ui_tx.send(snap);
-                }
-                let _ = ui_tx.send(done);
-                break;
-            }
-            if state.dirty && last_flush.elapsed() >= flush_interval {
-                let _ = ui_tx.send(state.flush());
-                last_flush = Instant::now();
             }
         }
-    });
-    ui_rx
+        None => {}
+    }
+    false
 }
 
 #[cfg(test)]
@@ -224,8 +265,16 @@ mod tests {
     }
 
     #[test]
-    fn state_machine_strips_tool_calls_and_flushes_on_finish() {
-        let mut state = StreamCoalescerState::new(String::new(), String::new());
+    fn state_machine_strips_tool_calls_and_separates_step_reasoning() {
+        let mut state = StreamCoalescerState::new(
+            "Step 1".into(),
+            "Thought 1".into(),
+            CodeHighlightCache::new(),
+        );
+        assert!(matches!(
+            state.push_event(ChatEvent::ReasoningToken("Thought 2".into())),
+            CoalescerAction::Continue
+        ));
         assert!(matches!(
             state.push_event(ChatEvent::Token("Hello ".into())),
             CoalescerAction::Continue
@@ -244,11 +293,13 @@ mod tests {
         let (trailing, done) = state.finish();
         assert!(matches!(
             trailing,
-            Some(StreamStepUpdate::Snapshot { ref combined, .. }) if combined == "Hello"
+            Some(StreamStepUpdate::Snapshot { ref combined, ref reasoning, .. })
+                if combined == "Step 1\n\nHello" && reasoning.as_deref() == Some("Thought 1\n\nThought 2")
         ));
         assert!(matches!(
             done,
-            StreamStepUpdate::Done { ref step_answer, .. } if step_answer.contains("<tool_call>")
+            StreamStepUpdate::Done { ref step_answer, ref full_reasoning, .. }
+                if step_answer.contains("<tool_call>") && full_reasoning == "Thought 1\n\nThought 2"
         ));
     }
 
@@ -256,9 +307,11 @@ mod tests {
     async fn flushes_dirty_trailing_tokens_before_done() {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut out = spawn_stream_coalescer_with_interval(
+            &tokio::runtime::Handle::current(),
             rx,
             String::new(),
             String::new(),
+            CodeHighlightCache::new(),
             Duration::from_secs(60),
         );
 
@@ -276,13 +329,23 @@ mod tests {
         assert_eq!(snapshots.last().map(String::as_str), Some("final-tail"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn timer_flushes_buffered_tokens_after_interval() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut out =
-            spawn_stream_coalescer_with_interval(rx, String::new(), String::new(), Duration::ZERO);
+        let mut out = spawn_stream_coalescer_with_interval(
+            &tokio::runtime::Handle::current(),
+            rx,
+            String::new(),
+            String::new(),
+            CodeHighlightCache::new(),
+            Duration::from_millis(80),
+        );
 
         let _ = tx.send(ChatEvent::Token("hello ".into()));
+        tokio::task::yield_now().await;
+        assert!(out.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_millis(85)).await;
         let ev = out.recv().await.expect("timed flush snapshot");
         assert!(matches!(
             ev,
@@ -293,13 +356,18 @@ mod tests {
 
     #[test]
     fn status_events_are_suppressed_on_continuation_steps() {
-        let mut state = StreamCoalescerState::new("Earlier answer".into(), String::new());
+        let mut state = StreamCoalescerState::new(
+            "Earlier answer".into(),
+            String::new(),
+            CodeHighlightCache::new(),
+        );
         assert!(matches!(
             state.push_event(ChatEvent::Status("Generating…".into())),
             CoalescerAction::Continue
         ));
 
-        let mut fresh = StreamCoalescerState::new(String::new(), String::new());
+        let mut fresh =
+            StreamCoalescerState::new(String::new(), String::new(), CodeHighlightCache::new());
         assert!(matches!(
             fresh.push_event(ChatEvent::Status("Generating…".into())),
             CoalescerAction::Forward(StreamStepUpdate::Status(ref s)) if s == "Generating…"

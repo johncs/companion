@@ -10,11 +10,8 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 gettext-rs.workspace = true
-pdf-extract.workspace = true
-pulldown-cmark.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-syntect.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-uuid.workspace = true

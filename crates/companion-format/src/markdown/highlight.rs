@@ -1,5 +1,6 @@
 //! Syntax highlighting (`syntect`) and language label helpers for Markdown code blocks.
 
+use std::fmt::Write as _;
 use std::sync::LazyLock;
 
 use syntect::easy::HighlightLines;
@@ -69,12 +70,14 @@ pub fn highlight_code_pango(code: &str, language: Option<&str>, theme_name: &str
 }
 
 fn append_styled_span(out: &mut String, style: Style, text: &str) {
-    let escaped = escape_pango_markup(text);
     let fg = style.foreground;
-    out.push_str(&format!(
-        "<span foreground=\"#{:02x}{:02x}{:02x}\">{escaped}</span>",
+    let _ = write!(
+        out,
+        "<span foreground=\"#{:02x}{:02x}{:02x}\">",
         fg.r, fg.g, fg.b
-    ));
+    );
+    super::push_escaped_pango(out, text);
+    out.push_str("</span>");
 }
 
 /// Formats a fenced code block's language tag for display by capitalizing its

@@ -8,12 +8,13 @@ mod table;
 mod tests;
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 pub use highlight::{format_code_language, highlight_code_pango, warm_syntax_highlighting};
 
-/// Escape XML/Pango markup special characters (`&`, `<`, `>`, `"`, `'`) in pure Rust.
-pub fn escape_pango_markup(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+/// Append XML/Pango-escaped `input` directly into `out`.
+pub(crate) fn push_escaped_pango(out: &mut String, input: &str) {
     for ch in input.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
@@ -24,6 +25,12 @@ pub fn escape_pango_markup(input: &str) -> String {
             _ => out.push(ch),
         }
     }
+}
+
+/// Escape XML/Pango markup special characters (`&`, `<`, `>`, `"`, `'`) in pure Rust.
+pub fn escape_pango_markup(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    push_escaped_pango(&mut out, input);
     out
 }
 
@@ -50,8 +57,68 @@ pub enum MarkdownBlock {
     },
 }
 
-/// Cache of already-highlighted `(language, code) -> (light_markup, dark_markup)` to avoid `O(N^2)` work while streaming.
-pub type CodeHighlightCache = HashMap<(Option<String>, String), (String, String)>;
+const MAX_HIGHLIGHT_CACHE_ENTRIES: usize = 256;
+
+#[derive(Debug, Clone, Default)]
+struct CachedHighlight {
+    language: Option<String>,
+    code: String,
+    light: String,
+    dark: String,
+}
+
+/// Bounded cache of already-highlighted `(language, code) -> (light_markup, dark_markup)` to avoid `O(N^2)` work while streaming.
+#[derive(Debug, Clone, Default)]
+pub struct CodeHighlightCache {
+    entries: HashMap<u64, CachedHighlight>,
+}
+
+impl CodeHighlightCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn get(&self, language: Option<&str>, code: &str) -> Option<(&str, &str)> {
+        let key = hash_code_key(language, code);
+        let entry = self.entries.get(&key)?;
+        if entry.language.as_deref() == language && entry.code == code {
+            Some((entry.light.as_str(), entry.dark.as_str()))
+        } else {
+            None
+        }
+    }
+
+    pub fn insert(&mut self, language: Option<&str>, code: &str, light: String, dark: String) {
+        if self.entries.len() >= MAX_HIGHLIGHT_CACHE_ENTRIES {
+            self.entries.clear();
+        }
+        let key = hash_code_key(language, code);
+        self.entries.insert(
+            key,
+            CachedHighlight {
+                language: language.map(str::to_string),
+                code: code.to_string(),
+                light,
+                dark,
+            },
+        );
+    }
+}
+
+fn hash_code_key(language: Option<&str>, code: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    language.hash(&mut hasher);
+    code.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Parse Markdown into cached [`MarkdownBlock`]s ready for GTK4 labels.
 pub fn parse_markdown_blocks(input: &str) -> Vec<MarkdownBlock> {

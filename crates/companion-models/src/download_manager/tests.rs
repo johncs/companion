@@ -1,4 +1,5 @@
 use super::*;
+use crate::huggingface::part_file_path;
 
 struct MockFetcher {
     pause_on_first: AtomicBool,
@@ -103,7 +104,7 @@ async fn download_manager_cancel_cleans_part_files_active_and_paused() {
         if snap.done == 50 && !snap.status.is_paused() {
             mgr.pause(&handle.key);
         } else if snap.status == DownloadStatus::Paused {
-            mgr.cancel(&handle.key).unwrap();
+            mgr.cancel(&handle.key);
         } else if snap.status.is_terminal() {
             assert_eq!(snap.status, DownloadStatus::Cancelled);
             break;
@@ -111,15 +112,108 @@ async fn download_manager_cancel_cleans_part_files_active_and_paused() {
     }
 
     let part = dir.join("models/org--cancel/m.gguf.part");
-    for _ in 0..1000 {
-        if !part.exists() && db.list_pending_downloads().unwrap().is_empty() {
-            break;
+    if part.exists() {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(5));
+        for _ in 0..40 {
+            if !part.exists() && db.list_pending_downloads().unwrap().is_empty() {
+                break;
+            }
+            tick.tick().await;
         }
-        tokio::task::yield_now().await;
     }
 
     assert!(!part.exists());
     assert!(db.list_pending_downloads().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn active_cancel_and_pause_resume_serialize_workers() {
+    struct BarrierFetcher {
+        active_count: Arc<std::sync::atomic::AtomicUsize>,
+        max_concurrent: Arc<std::sync::atomic::AtomicUsize>,
+        started_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release_rx: tokio::sync::watch::Receiver<bool>,
+    }
+    impl ModelFetcher for BarrierFetcher {
+        fn fetch<'a>(
+            &'a self,
+            _repo_id: &'a str,
+            _filename: &'a str,
+            dest_path: &'a Path,
+            stop_flag: Arc<AtomicBool>,
+            on_progress: ProgressCb,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            let mut release_rx = self.release_rx.clone();
+            Box::pin(async move {
+                let cur = self.active_count.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_concurrent.fetch_max(cur, Ordering::SeqCst);
+                if let Some(tx) = self.started_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                if !stop_flag.load(Ordering::Relaxed) {
+                    tokio::select! {
+                        _ = release_rx.wait_for(|&r| r) => {}
+                        _ = async {
+                            while !stop_flag.load(Ordering::Relaxed) {
+                                tokio::task::yield_now().await;
+                            }
+                        } => {}
+                    }
+                }
+                self.active_count.fetch_sub(1, Ordering::SeqCst);
+                if stop_flag.load(Ordering::Relaxed) {
+                    anyhow::bail!("stopped");
+                }
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(dest_path, b"GGUF")?;
+                on_progress(4, Some(4));
+                Ok(())
+            })
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("companion_dm_ser_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Database::open(dir.join("test.db")).unwrap();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let active_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_concurrent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+
+    let mgr = DownloadManager::with_fetcher(
+        db,
+        dir.join("models"),
+        tokio::runtime::Handle::current(),
+        Arc::new(BarrierFetcher {
+            active_count,
+            max_concurrent: max_concurrent.clone(),
+            started_tx: std::sync::Mutex::new(Some(started_tx)),
+            release_rx,
+        }),
+    );
+
+    let mut handle = mgr.start_download(DownloadRequest {
+        repo_id: "org/serial".into(),
+        filename: "m.gguf".into(),
+        mmproj_filename: None,
+        display_name: "Serial".into(),
+        attach_to_model_id: None,
+    });
+    started_rx.await.unwrap();
+    mgr.pause(&handle.key);
+    assert!(mgr.resume(&handle.key));
+    let _ = release_tx.send(true);
+
+    while let Ok(snap) = handle.rx.recv().await {
+        if snap.status.is_terminal() {
+            assert_eq!(snap.status, DownloadStatus::Completed);
+            break;
+        }
+    }
+    assert_eq!(max_concurrent.load(Ordering::SeqCst), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -156,7 +250,7 @@ async fn restore_pending_restores_part_files_and_prunes_stale_entries() {
             pause_on_first: AtomicBool::new(false),
         }),
     );
-    let handles = mgr.restore_pending();
+    let handles = mgr.restore_pending().await;
     assert_eq!(handles.len(), 1);
     assert_eq!(handles[0].key, ("org/keep".into(), "keep.gguf".into()));
     assert_eq!(handles[0].initial.done, 4);
@@ -175,7 +269,7 @@ async fn mmproj_attach_updates_existing_model_without_duplicating() {
     db.upsert_model(&companion_storage::ModelRecord {
         id: "m-vision".into(),
         display_name: "Vision Base".into(),
-        provider_type: "llama_cpp".into(),
+        provider_type: companion_core::types::ModelProviderType::LlamaCpp,
         file_path: Some("/tmp/base.gguf".into()),
         mmproj_path: None,
         hf_repo: Some("org/vision".into()),
@@ -238,6 +332,7 @@ async fn mmproj_failure_cancels_sibling_model_fetch() {
             let saw_stop = self.saw_stop.clone();
             Box::pin(async move {
                 if is_mmproj {
+                    tokio::task::yield_now().await;
                     anyhow::bail!("mmproj HTTP 404");
                 }
                 struct CancelGuard(Arc<AtomicBool>);

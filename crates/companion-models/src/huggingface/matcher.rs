@@ -8,10 +8,7 @@ use super::{HfClient, HfGgufFile, MmprojMatch};
 /// by removing the `.gguf` extension and trailing quantization/packaging tags.
 pub fn derive_hf_search_query(filename_or_name: &str) -> String {
     let trimmed = filename_or_name.trim();
-    let stem = trimmed
-        .strip_suffix(".gguf")
-        .or_else(|| trimmed.strip_suffix(".GGUF"))
-        .unwrap_or(trimmed);
+    let stem = crate::strip_gguf_suffix(trimmed);
 
     let without_quant = if let Some(quant) = crate::infer_quantization(stem) {
         let lower_stem = stem.to_ascii_lowercase();
@@ -160,16 +157,26 @@ pub(super) async fn find_matching_mmproj_with(
         sb.cmp(&sa).then_with(|| b.downloads.cmp(&a.downloads))
     });
 
+    let mut last_err: Option<anyhow::Error> = None;
     for repo in repos.into_iter().take(5) {
-        if let Ok(files) = client.list_repo_gguf_files(&repo.id).await
-            && let Some(file) = select_best_mmproj(&files)
-        {
-            return Ok(Some(MmprojMatch {
-                repo_id: repo.id,
-                file,
-            }));
+        match client.list_repo_gguf_files(&repo.id).await {
+            Ok(files) => {
+                if let Some(file) = select_best_mmproj(&files) {
+                    return Ok(Some(MmprojMatch {
+                        repo_id: repo.id,
+                        file,
+                    }));
+                }
+            }
+            Err(err) => {
+                tracing::warn!("Failed to list files in HF repo {}: {err}", repo.id);
+                last_err = Some(err);
+            }
         }
     }
 
+    if let Some(err) = last_err {
+        return Err(err);
+    }
     Ok(None)
 }

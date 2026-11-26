@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 companion-core.workspace = true
+companion-format.workspace = true
 companion-storage.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
@@ -18,3 +19,6 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

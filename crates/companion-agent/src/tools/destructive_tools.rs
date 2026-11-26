@@ -1,6 +1,6 @@
 //! Destructive workspace tools: `delete_file` and `delete_directory`.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -8,8 +8,14 @@ use super::fs_ops::{delete_granted_directory, delete_granted_file};
 use super::path_guard::{
     prepare_workspace_auth, resolve_granted_root, resolve_write_folder_for_raw,
 };
+use super::run_blocking_tool;
 use crate::approval::ApprovalResponse;
-use crate::tool::{BoxFuture, Tool, ToolAuthorization, ToolContext, ToolPrepareContext, ToolRisk};
+use crate::tool::{
+    BoxFuture, PreparedToolCall, Tool, ToolAuthorization, ToolContext, ToolMetadata,
+    ToolPrepareContext, ToolRisk,
+};
+use companion_core::i18n::gettext;
+use companion_core::types::ToolCallStatus;
 
 #[derive(Deserialize)]
 struct DeleteFileArgs {
@@ -31,7 +37,7 @@ struct DeleteDirArgs {
 pub struct DeleteFileTool;
 
 impl Tool for DeleteFileTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "delete_file"
     }
 
@@ -39,28 +45,49 @@ impl Tool for DeleteFileTool {
         ToolRisk::Destructive
     }
 
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            display_name: gettext("Delete File"),
+            description: gettext("Delete a single file inside a granted directory."),
+            prompt_summary: "Delete a single file in a [read & write] directory (requires user approval).",
+            parameter_example: r#"{"root": "/granted/dir", "path": "relative/path"}"#,
+            read_policy: "Ask",
+            rw_policy: "Ask",
+        }
+    }
+
     fn prepare<'a>(
         &'a self,
         ctx: &'a ToolPrepareContext<'a>,
         args: &'a Value,
     ) -> BoxFuture<'a, ToolAuthorization> {
-        let parsed = serde_json::from_value::<DeleteFileArgs>(args.clone()).ok();
+        let parsed = serde_json::from_value::<DeleteFileArgs>(args.clone());
         Box::pin(async move {
+            let Some(parsed) = parsed.ok().filter(|a| !a.path.trim().is_empty()) else {
+                return ToolAuthorization::Rejected {
+                    status: ToolCallStatus::Error,
+                    reason: "Missing 'path' argument".to_string(),
+                };
+            };
             let raw_target = parsed
-                .as_ref()
-                .and_then(|a| a.root.as_deref().or(Some(a.path.as_str())));
-            let write_folder = parsed.as_ref().and_then(|a| {
-                resolve_write_folder_for_raw(ctx.granted_folders, &a.path, a.root.as_deref())
-            });
-            let path_display = parsed.as_ref().map(|a| a.path.as_str()).unwrap_or("?");
-            let preview = format!("Delete file:\n\n{path_display}");
+                .root
+                .as_deref()
+                .unwrap_or(parsed.path.as_str())
+                .to_string();
+            let write_folder = resolve_write_folder_for_raw(
+                ctx.granted_folders,
+                &parsed.path,
+                parsed.root.as_deref(),
+            );
+            let preview = format!("Delete file:\n\n{}", parsed.path);
             prepare_workspace_auth(
                 ctx,
                 self.name(),
                 self.risk(),
-                raw_target,
+                Some(&raw_target),
                 write_folder,
                 preview,
+                PreparedToolCall::new(parsed),
             )
         })
     }
@@ -68,21 +95,18 @@ impl Tool for DeleteFileTool {
     fn execute_approved<'a>(
         &'a self,
         ctx: &'a ToolContext<'a>,
-        args: &'a Value,
+        prepared: PreparedToolCall,
         _approval: &'a ApprovalResponse,
     ) -> BoxFuture<'a, Result<String>> {
         let grants = ctx.granted_folders.to_vec();
-        let args = args.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let parsed: DeleteFileArgs =
-                    serde_json::from_value(args).context("Missing 'path' argument")?;
+            let parsed: DeleteFileArgs = prepared.downcast()?;
+            run_blocking_tool(move || {
                 let (root, rel_path) =
                     resolve_granted_root(&grants, &parsed.path, parsed.root.as_deref(), true)?;
                 delete_granted_file(&root, &rel_path)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("Tool task failed: {e}"))?
         })
     }
 }
@@ -91,7 +115,7 @@ impl Tool for DeleteFileTool {
 pub struct DeleteDirectoryTool;
 
 impl Tool for DeleteDirectoryTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "delete_directory"
     }
 
@@ -99,28 +123,49 @@ impl Tool for DeleteDirectoryTool {
         ToolRisk::Destructive
     }
 
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            display_name: gettext("Delete Directory"),
+            description: gettext("Delete a subdirectory inside a granted directory."),
+            prompt_summary: "Recursively delete a subdirectory in a [read & write] directory (requires user approval).",
+            parameter_example: r#"{"root": "/granted/dir", "path": "relative/dir"}"#,
+            read_policy: "Ask",
+            rw_policy: "Ask",
+        }
+    }
+
     fn prepare<'a>(
         &'a self,
         ctx: &'a ToolPrepareContext<'a>,
         args: &'a Value,
     ) -> BoxFuture<'a, ToolAuthorization> {
-        let parsed = serde_json::from_value::<DeleteDirArgs>(args.clone()).ok();
+        let parsed = serde_json::from_value::<DeleteDirArgs>(args.clone());
         Box::pin(async move {
+            let Some(parsed) = parsed.ok().filter(|a| !a.path.trim().is_empty()) else {
+                return ToolAuthorization::Rejected {
+                    status: ToolCallStatus::Error,
+                    reason: "Missing 'path' argument".to_string(),
+                };
+            };
             let raw_target = parsed
-                .as_ref()
-                .and_then(|a| a.root.as_deref().or(Some(a.path.as_str())));
-            let write_folder = parsed.as_ref().and_then(|a| {
-                resolve_write_folder_for_raw(ctx.granted_folders, &a.path, a.root.as_deref())
-            });
-            let path_display = parsed.as_ref().map(|a| a.path.as_str()).unwrap_or("?");
-            let preview = format!("Delete directory (and its contents):\n\n{path_display}");
+                .root
+                .as_deref()
+                .unwrap_or(parsed.path.as_str())
+                .to_string();
+            let write_folder = resolve_write_folder_for_raw(
+                ctx.granted_folders,
+                &parsed.path,
+                parsed.root.as_deref(),
+            );
+            let preview = format!("Delete directory (and its contents):\n\n{}", parsed.path);
             prepare_workspace_auth(
                 ctx,
                 self.name(),
                 self.risk(),
-                raw_target,
+                Some(&raw_target),
                 write_folder,
                 preview,
+                PreparedToolCall::new(parsed),
             )
         })
     }
@@ -128,21 +173,18 @@ impl Tool for DeleteDirectoryTool {
     fn execute_approved<'a>(
         &'a self,
         ctx: &'a ToolContext<'a>,
-        args: &'a Value,
+        prepared: PreparedToolCall,
         _approval: &'a ApprovalResponse,
     ) -> BoxFuture<'a, Result<String>> {
         let grants = ctx.granted_folders.to_vec();
-        let args = args.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let parsed: DeleteDirArgs =
-                    serde_json::from_value(args).context("Missing 'path' argument")?;
+            let parsed: DeleteDirArgs = prepared.downcast()?;
+            run_blocking_tool(move || {
                 let (root, rel_path) =
                     resolve_granted_root(&grants, &parsed.path, parsed.root.as_deref(), true)?;
                 delete_granted_directory(&root, &rel_path)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("Tool task failed: {e}"))?
         })
     }
 }

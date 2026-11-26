@@ -6,11 +6,12 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::core::types::{ExecutionDevice, MessageRole, ToolCallStatus};
-use crate::i18n::{gettext, tr_f};
+use crate::core::types::{MessageRole, ToolCallStatus};
+use crate::i18n::gettext;
 use crate::ui::message_object::{MessageEntry, MessageObject};
 
-use super::copy_text_with_feedback;
+use super::view_model::MessageInfoViewModel;
+use super::{copy_text_with_feedback, format_timestamp_text};
 
 struct InfoWidgets {
     date_val: gtk::Label,
@@ -35,32 +36,25 @@ pub fn present_message_info_dialog(parent: &impl IsA<gtk::Widget>, msg_obj: Mess
         .content_height(560)
         .build();
 
-    let (stats_group, mut widgets) = build_stats_group(is_user);
     let (thinking_section, thinking_buf) = build_thinking_section();
-    widgets.thinking_section = thinking_section;
-    widgets.thinking_buf = thinking_buf;
+    let (stats_group, widgets) = build_stats_group(is_user, thinking_section, thinking_buf);
+    let content_box = build_info_content_box(&stats_group, &widgets);
 
-    let content_box = crate::ui::widgets::dialog_content_box();
-    content_box.set_vexpand(true);
-    content_box.append(&stats_group);
-    content_box.append(&widgets.attachments_group);
-    content_box.append(&widgets.tools_group);
-    content_box.append(&widgets.thinking_section);
-
-    let last_len = Rc::new(std::cell::Cell::new(0usize));
-    let rendered_tools = Rc::new(std::cell::Cell::new(0usize));
-    let rendered_atts = Rc::new(std::cell::Cell::new(false));
+    let (last_len, tool_rows, rendered_atts) = (
+        Rc::new(std::cell::Cell::new(0usize)),
+        Rc::new(RefCell::new(Vec::new())),
+        Rc::new(std::cell::Cell::new(false)),
+    );
     let sync_from_entry = move |entry: &MessageEntry| {
         sync_entry_to_widgets(
             entry,
             is_user,
             &widgets,
             &last_len,
-            &rendered_tools,
+            &tool_rows,
             &rendered_atts,
         );
     };
-
     msg_obj.with_entry(&sync_from_entry);
 
     let outer_scroller = gtk::ScrolledWindow::builder()
@@ -69,12 +63,33 @@ pub fn present_message_info_dialog(parent: &impl IsA<gtk::Widget>, msg_obj: Mess
         .hscrollbar_policy(gtk::PolicyType::Never)
         .child(&content_box)
         .build();
-
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
     toolbar.set_content(Some(&outer_scroller));
     dialog.set_child(Some(&toolbar));
+    connect_info_live_updates(&dialog, msg_obj, sync_from_entry);
+    dialog.present(Some(parent));
+}
 
+fn build_info_content_box(stats_group: &adw::PreferencesGroup, widgets: &InfoWidgets) -> gtk::Box {
+    let content_box = crate::ui::widgets::dialog_content_box();
+    content_box.set_vexpand(true);
+    for child in [
+        stats_group.upcast_ref::<gtk::Widget>(),
+        widgets.attachments_group.upcast_ref(),
+        widgets.tools_group.upcast_ref(),
+        widgets.thinking_section.upcast_ref(),
+    ] {
+        content_box.append(child);
+    }
+    content_box
+}
+
+fn connect_info_live_updates(
+    dialog: &adw::Dialog,
+    msg_obj: MessageObject,
+    sync_from_entry: impl Fn(&MessageEntry) + 'static,
+) {
     let obj_watch = msg_obj.clone();
     let handler_id = Rc::new(RefCell::new(Some(msg_obj.connect_local(
         "updated",
@@ -89,8 +104,6 @@ pub fn present_message_info_dialog(parent: &impl IsA<gtk::Widget>, msg_obj: Mess
             msg_obj.disconnect(id);
         }
     });
-
-    dialog.present(Some(parent));
 }
 
 fn make_val_label(numeric: bool) -> gtk::Label {
@@ -105,7 +118,11 @@ fn make_val_label(numeric: bool) -> gtk::Label {
         .build()
 }
 
-fn build_stats_group(is_user: bool) -> (adw::PreferencesGroup, InfoWidgets) {
+fn build_stats_group(
+    is_user: bool,
+    thinking_section: gtk::Box,
+    thinking_buf: gtk::TextBuffer,
+) -> (adw::PreferencesGroup, InfoWidgets) {
     let date_val = make_val_label(true);
     let model_val = make_val_label(false);
     model_val.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -116,21 +133,19 @@ fn build_stats_group(is_user: bool) -> (adw::PreferencesGroup, InfoWidgets) {
     let tokens_val = make_val_label(true);
 
     let stats_group = adw::PreferencesGroup::new();
-    for (title, val, assistant_only) in [
-        (gettext("Date &amp; Time"), &date_val, false),
-        (gettext("AI Model"), &model_val, true),
-        (gettext("Compute Device"), &device_val, true),
-        (gettext("Thinking Level"), &thinking_level_val, true),
-        (gettext("Completion Time"), &time_val, true),
-        (gettext("Generation Speed"), &speed_val, true),
-        (gettext("Total Tokens"), &tokens_val, true),
-    ] {
-        if !assistant_only || !is_user {
-            let row = adw::ActionRow::builder().title(title).build();
-            row.add_suffix(val);
-            stats_group.add(&row);
-        }
-    }
+    add_stat_rows(
+        &stats_group,
+        is_user,
+        &[
+            (gettext("Date &amp; Time"), &date_val, false),
+            (gettext("AI Model"), &model_val, true),
+            (gettext("Compute Device"), &device_val, true),
+            (gettext("Thinking Level"), &thinking_level_val, true),
+            (gettext("Completion Time"), &time_val, true),
+            (gettext("Generation Speed"), &speed_val, true),
+            (gettext("Total Tokens"), &tokens_val, true),
+        ],
+    );
 
     let widgets = InfoWidgets {
         date_val,
@@ -148,32 +163,28 @@ fn build_stats_group(is_user: bool) -> (adw::PreferencesGroup, InfoWidgets) {
             .title(gettext("Tool Calls"))
             .visible(false)
             .build(),
-        thinking_section: gtk::Box::new(gtk::Orientation::Vertical, 0),
-        thinking_buf: gtk::TextBuffer::new(None),
+        thinking_section,
+        thinking_buf,
     };
     (stats_group, widgets)
 }
 
-fn build_thinking_section() -> (gtk::Box, gtk::TextBuffer) {
-    let thinking_header = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .margin_top(4)
-        .build();
-    let thinking_title = gtk::Label::builder()
-        .label(gettext("Thinking"))
-        .xalign(0.0)
-        .hexpand(true)
-        .css_classes(["heading"])
-        .build();
-    let copy_btn = gtk::Button::builder()
-        .icon_name("edit-copy-symbolic")
-        .tooltip_text(gettext("Copy thinking"))
-        .css_classes(["flat", "circular"])
-        .build();
-    thinking_header.append(&thinking_title);
-    thinking_header.append(&copy_btn);
+fn add_stat_rows(
+    group: &adw::PreferencesGroup,
+    is_user: bool,
+    items: &[(String, &gtk::Label, bool)],
+) {
+    for (title, val, assistant_only) in items {
+        if !assistant_only || !is_user {
+            let row = adw::ActionRow::builder().title(title).build();
+            row.add_suffix(*val);
+            group.add(&row);
+        }
+    }
+}
 
+fn build_thinking_section() -> (gtk::Box, gtk::TextBuffer) {
+    let (thinking_header, copy_btn) = build_thinking_header();
     let text_view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
@@ -193,16 +204,13 @@ fn build_thinking_section() -> (gtk::Box, gtk::TextBuffer) {
         let (s, e) = buf_copy.bounds();
         copy_text_with_feedback(btn, &buf_copy.text(&s, &e, false));
     });
-
-    let scroller = gtk::ScrolledWindow::builder()
+    let scroller = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
         .vexpand(true)
         .hexpand(true)
-        .min_content_height(260)
-        .hscrollbar_policy(gtk::PolicyType::Never)
         .css_classes(["card"])
-        .child(&text_view)
         .build();
-
+    scroller.append(&text_view);
     let thinking_section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
@@ -213,12 +221,39 @@ fn build_thinking_section() -> (gtk::Box, gtk::TextBuffer) {
     (thinking_section, buf)
 }
 
+fn build_thinking_header() -> (gtk::Box, gtk::Button) {
+    let thinking_header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(4)
+        .build();
+    let thinking_title = gtk::Label::builder()
+        .label(gettext("Thinking"))
+        .xalign(0.0)
+        .hexpand(true)
+        .css_classes(["heading"])
+        .build();
+    let copy_btn = gtk::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text(gettext("Copy thinking"))
+        .css_classes(["flat", "circular"])
+        .build();
+    thinking_header.append(&thinking_title);
+    thinking_header.append(&copy_btn);
+    (thinking_header, copy_btn)
+}
+
+struct ToolRowWidgets {
+    row: adw::ActionRow,
+    status_lbl: gtk::Label,
+}
+
 fn sync_entry_to_widgets(
     entry: &MessageEntry,
     is_user: bool,
     w: &InfoWidgets,
     last_len: &std::cell::Cell<usize>,
-    rendered_tools: &std::cell::Cell<usize>,
+    tool_rows: &RefCell<Vec<ToolRowWidgets>>,
     rendered_atts: &std::cell::Cell<bool>,
 ) {
     w.date_val
@@ -226,156 +261,126 @@ fn sync_entry_to_widgets(
     if is_user {
         w.thinking_section.set_visible(false);
         w.tools_group.set_visible(false);
-        if !entry.attachments.is_empty() && !rendered_atts.get() {
-            w.attachments_group.set_visible(true);
-            for att in &entry.attachments {
-                w.attachments_group.add(
-                    &adw::ActionRow::builder()
-                        .title(glib::markup_escape_text(&att.file_name))
-                        .subtitle(glib::markup_escape_text(&att.mime_type))
-                        .build(),
-                );
-            }
-            rendered_atts.set(true);
-        }
+        sync_user_attachments(entry, &w.attachments_group, rendered_atts);
         return;
     }
 
     w.model_val
         .set_label(entry.model_name.as_deref().unwrap_or("—"));
-    let device_label = match entry.execution_device {
-        Some(ExecutionDevice::Gpu) => gettext("GPU (Vulkan)"),
-        Some(ExecutionDevice::Cpu) => gettext("CPU"),
-        None => "—".to_string(),
+    w.device_val
+        .set_label(&MessageInfoViewModel::device_label(entry.execution_device));
+    w.thinking_level_val
+        .set_label(&entry.thinking_level.unwrap_or_default().label());
+    w.time_val
+        .set_label(&MessageInfoViewModel::duration_text(entry));
+    w.speed_val
+        .set_label(&MessageInfoViewModel::speed_text(entry));
+    w.tokens_val
+        .set_label(&MessageInfoViewModel::tokens_text(entry));
+
+    sync_tool_call_rows(&entry.tool_calls, &w.tools_group, tool_rows);
+    sync_thinking_buffer(
+        entry.reasoning_content.as_deref(),
+        &w.thinking_section,
+        &w.thinking_buf,
+        last_len,
+    );
+}
+
+fn sync_user_attachments(
+    entry: &MessageEntry,
+    group: &adw::PreferencesGroup,
+    rendered_atts: &std::cell::Cell<bool>,
+) {
+    if !entry.attachments.is_empty() && !rendered_atts.get() {
+        group.set_visible(true);
+        for att in &entry.attachments {
+            group.add(
+                &adw::ActionRow::builder()
+                    .title(glib::markup_escape_text(&att.file_name))
+                    .subtitle(glib::markup_escape_text(&att.mime_type))
+                    .build(),
+            );
+        }
+        rendered_atts.set(true);
+    }
+}
+
+fn sync_tool_call_rows(
+    tool_calls: &[crate::storage::ToolCallRecord],
+    group: &adw::PreferencesGroup,
+    tool_rows: &RefCell<Vec<ToolRowWidgets>>,
+) {
+    if tool_calls.is_empty() {
+        group.set_visible(false);
+        return;
+    }
+    group.set_visible(true);
+    let mut rows = tool_rows.borrow_mut();
+    while rows.len() > tool_calls.len() {
+        if let Some(removed) = rows.pop() {
+            group.remove(&removed.row);
+        }
+    }
+    for (idx, tc) in tool_calls.iter().enumerate() {
+        if let Some(existing) = rows.get(idx) {
+            update_tool_call_row(existing, tc);
+        } else {
+            let built = build_tool_call_row(tc);
+            group.add(&built.row);
+            rows.push(built);
+        }
+    }
+}
+
+fn sync_thinking_buffer(
+    reasoning: Option<&str>,
+    section: &gtk::Box,
+    buf: &gtk::TextBuffer,
+    last_len: &std::cell::Cell<usize>,
+) {
+    let Some(full) = reasoning.filter(|r| !r.is_empty()) else {
+        section.set_visible(false);
+        if last_len.get() != 0 {
+            buf.set_text("");
+            last_len.set(0);
+        }
+        return;
     };
-    w.device_val.set_label(&device_label);
-    let lvl = entry.thinking_level.unwrap_or_default();
-    w.thinking_level_val.set_label(&lvl.label());
-    w.time_val.set_label(&format_duration_text(entry));
-    w.speed_val.set_label(&format_speed_text(entry));
-    w.tokens_val.set_label(&format_tokens_text(entry));
-
-    if entry.tool_calls.is_empty() {
-        w.tools_group.set_visible(false);
-    } else {
-        w.tools_group.set_visible(true);
-        let prev_tc = rendered_tools.get();
-        if entry.tool_calls.len() > prev_tc {
-            for tc in &entry.tool_calls[prev_tc..] {
-                w.tools_group.add(&build_tool_call_row(tc));
-            }
-            rendered_tools.set(entry.tool_calls.len());
-        }
-    }
-
-    if let Some(full) = entry.reasoning_content.as_deref().filter(|r| !r.is_empty()) {
-        w.thinking_section.set_visible(true);
-        let prev = last_len.get();
-        if prev == 0 {
-            w.thinking_buf.set_text(full);
-            last_len.set(full.len());
-        } else if full.len() > prev && full.is_char_boundary(prev) {
-            let mut end = w.thinking_buf.end_iter();
-            w.thinking_buf.insert(&mut end, &full[prev..]);
-            last_len.set(full.len());
-        }
-    } else {
-        w.thinking_section.set_visible(false);
+    section.set_visible(true);
+    let prev = last_len.get();
+    if prev > 0 && full.len() > prev && full.is_char_boundary(prev) {
+        let mut end = buf.end_iter();
+        buf.insert(&mut end, &full[prev..]);
+        last_len.set(full.len());
+    } else if full.len() != prev || prev == 0 {
+        buf.set_text(full);
+        last_len.set(full.len());
     }
 }
 
-fn format_timestamp_text(created_at_ms: i64) -> String {
-    glib::DateTime::from_unix_utc(created_at_ms / 1000)
-        .and_then(|dt| dt.to_local())
-        .and_then(|local| local.format("%x · %X"))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|_| "—".to_string())
+fn build_tool_call_row(tc: &crate::storage::ToolCallRecord) -> ToolRowWidgets {
+    let status_lbl = gtk::Label::builder().valign(gtk::Align::Center).build();
+    let row = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(&tc.tool_name))
+        .subtitle_lines(1)
+        .build();
+    row.add_suffix(&status_lbl);
+    let widgets = ToolRowWidgets { row, status_lbl };
+    update_tool_call_row(&widgets, tc);
+    widgets
 }
 
-fn format_duration_text(entry: &MessageEntry) -> String {
-    if entry.is_streaming {
-        gettext("Generating…")
-    } else if let Some(ms) = entry.generation_ms {
-        format!("{:.2} s", (ms as f64) / 1000.0)
-    } else {
-        "—".to_string()
-    }
-}
-
-fn format_speed_text(entry: &MessageEntry) -> String {
-    if entry.is_streaming {
-        gettext("Generating…")
-    } else if let Some(ms) = entry.generation_ms
-        && ms > 0
-        && entry.token_count > 0
-    {
-        let tps = (entry.token_count as f64) / ((ms as f64) / 1000.0);
-        tr_f("{speed} tokens/s", &[("speed", &format!("{tps:.1}"))])
-    } else {
-        "—".to_string()
-    }
-}
-
-fn format_tokens_text(entry: &MessageEntry) -> String {
-    if entry.is_streaming {
-        gettext("Generating…")
-    } else if entry.token_count > 0 {
-        entry.token_count.to_string()
-    } else {
-        "—".to_string()
-    }
-}
-
-fn build_tool_call_row(tc: &crate::storage::ToolCallRecord) -> adw::ActionRow {
-    let summary = summarize_tool_call(tc);
+fn update_tool_call_row(w: &ToolRowWidgets, tc: &crate::storage::ToolCallRecord) {
     let status_class = match tc.status {
         ToolCallStatus::Error => "error",
         ToolCallStatus::Denied => "warning",
         ToolCallStatus::Ok => "dim-label",
     };
-    let status_lbl = gtk::Label::builder()
-        .label(tc.status.as_str())
-        .valign(gtk::Align::Center)
-        .css_classes([status_class])
-        .build();
-
-    let row = adw::ActionRow::builder()
-        .title(glib::markup_escape_text(&tc.tool_name))
-        .subtitle(glib::markup_escape_text(&summary))
-        .subtitle_lines(1)
-        .build();
-    row.add_suffix(&status_lbl);
-    row
-}
-
-fn summarize_tool_call(tc: &crate::storage::ToolCallRecord) -> String {
-    let raw_target = serde_json::from_str::<serde_json::Value>(&tc.arguments_json)
-        .ok()
-        .and_then(|v| {
-            ["path", "subdir", "query", "command"]
-                .iter()
-                .find_map(|key| v.get(*key).and_then(|x| x.as_str()).map(str::to_string))
-        })
-        .unwrap_or_else(|| {
-            tc.arguments_json
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        });
-    let target = if raw_target.trim() == "." {
-        gettext("Granted root (.)")
-    } else {
-        raw_target
-    };
-
-    if tc.status != ToolCallStatus::Ok
-        && let Some(err) = tc
-            .output
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    {
-        return format!("{target} — {err}");
-    }
-    target
+    w.row.set_title(&glib::markup_escape_text(&tc.tool_name));
+    w.row.set_subtitle(&glib::markup_escape_text(
+        &MessageInfoViewModel::summarize_tool_call(tc),
+    ));
+    w.status_lbl.set_label(tc.status.as_str());
+    w.status_lbl.set_css_classes(&[status_class]);
 }

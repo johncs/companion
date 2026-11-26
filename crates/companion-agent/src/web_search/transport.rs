@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 const USER_AGENT: &str = "Companion/0.1 (Privacy-First Local AI)";
+const MAX_SEARCH_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct HttpResponse {
     pub status: u16,
@@ -51,7 +52,7 @@ impl HttpTransport for ReqwestTransport {
         query: &'a [(&'a str, &'a str)],
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse>> + Send + 'a>> {
         Box::pin(async move {
-            let resp = self
+            let mut resp = self
                 .search_client
                 .get(url)
                 .query(query)
@@ -59,11 +60,7 @@ impl HttpTransport for ReqwestTransport {
                 .await
                 .context("HTTP request failed")?;
             let status = resp.status().as_u16();
-            let body = resp
-                .bytes()
-                .await
-                .context("Failed to read HTTP response")?
-                .to_vec();
+            let body = read_bounded_body(&mut resp, MAX_SEARCH_RESPONSE_BYTES).await?;
             Ok(HttpResponse {
                 status,
                 location: None,
@@ -108,22 +105,7 @@ impl HttpTransport for ReqwestTransport {
                 });
             }
 
-            let mut body = Vec::new();
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .context("Failed while reading web page")?
-            {
-                let remaining = max_bytes.saturating_sub(body.len());
-                if remaining == 0 {
-                    break;
-                }
-                let take = chunk.len().min(remaining);
-                body.extend_from_slice(&chunk[..take]);
-                if body.len() >= max_bytes {
-                    break;
-                }
-            }
+            let body = read_bounded_body(&mut resp, max_bytes).await?;
             Ok(HttpResponse {
                 status,
                 location: None,
@@ -131,4 +113,24 @@ impl HttpTransport for ReqwestTransport {
             })
         })
     }
+}
+
+async fn read_bounded_body(resp: &mut reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .context("Failed while reading HTTP response")?
+    {
+        let remaining = max_bytes.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        let take = chunk.len().min(remaining);
+        body.extend_from_slice(&chunk[..take]);
+        if body.len() >= max_bytes {
+            break;
+        }
+    }
+    Ok(body)
 }

@@ -136,3 +136,63 @@ fn hf_client_parses_mock_search_and_tree_responses() {
         });
     server.join().unwrap();
 }
+
+fn spawn_once_http(response: Vec<u8>) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(&response);
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn download_gguf_rejects_truncated_eof_and_succeeds_on_exact_200() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let dir = std::env::temp_dir().join(format!("companion_hf_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let trunc_url = spawn_once_http(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n1234".to_vec(),
+    );
+    let client = HfClient::with_base_url(trunc_url);
+    let dest = dir.join("model.gguf");
+    let res = client
+        .download_gguf_file(
+            "org/repo",
+            "model.gguf",
+            &dest,
+            Arc::new(AtomicBool::new(false)),
+            |_, _| {},
+        )
+        .await;
+    assert!(res.is_err());
+    assert!(!dest.exists());
+
+    let ok_url = spawn_once_http(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nGGUF".to_vec(),
+    );
+    let ok_client = HfClient::with_base_url(ok_url);
+    let dest_ok = dir.join("ok.gguf");
+    ok_client
+        .download_gguf_file(
+            "org/repo",
+            "ok.gguf",
+            &dest_ok,
+            Arc::new(AtomicBool::new(false)),
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest_ok).unwrap(), b"GGUF");
+    let _ = std::fs::remove_dir_all(&dir);
+}

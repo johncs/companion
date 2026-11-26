@@ -4,12 +4,11 @@ mod migrations;
 #[cfg(test)]
 mod tests;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, Transaction};
 
 /// Current database schema version tracked via `PRAGMA user_version`.
-#[cfg(test)]
-pub(crate) const CURRENT_SCHEMA_VERSION: i32 = 16;
+pub const CURRENT_SCHEMA_VERSION: i32 = 17;
 
 pub(crate) type MigrationFn = fn(&Transaction<'_>) -> Result<()>;
 
@@ -30,6 +29,7 @@ pub(crate) const MIGRATIONS: &[(i32, MigrationFn)] = &[
     (14, migrations::migrate_v14),
     (15, migrations::migrate_v15),
     (16, migrations::migrate_v16),
+    (17, migrations::migrate_v17),
 ];
 
 /// Apply any pending migrations to bring the database up to `CURRENT_SCHEMA_VERSION`.
@@ -43,11 +43,16 @@ pub(crate) fn run_migration_list(
     migrations: &[(i32, MigrationFn)],
 ) -> Result<()> {
     let mut version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let max_supported = migrations.last().map(|&(v, _)| v).unwrap_or(0);
+    if version > max_supported {
+        bail!("Database schema version {version} is newer than supported version {max_supported}");
+    }
 
     for &(target_version, migrate_fn) in migrations {
         if version < target_version {
             let tx = conn.transaction()?;
-            migrate_fn(&tx)?;
+            migrate_fn(&tx)
+                .with_context(|| format!("Database migration v{target_version} failed"))?;
             tx.pragma_update(None, "user_version", target_version)?;
             tx.commit()?;
             version = target_version;

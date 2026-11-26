@@ -3,36 +3,40 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use rusqlite::{Row, params};
+use rusqlite::{Connection, Row, params};
 
 use companion_core::types::{PermissionDecision, ToolCallStatus};
 
 use super::Database;
 use super::entities::ToolCallRecord;
 
+const SQLITE_VAR_CHUNK: usize = 500;
+
+pub(crate) fn insert_tool_call_conn(conn: &Connection, tc: &ToolCallRecord) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "INSERT INTO tool_calls (id, message_id, tool_name, arguments_json, status, output, permission_decision, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    stmt.execute(params![
+        tc.id,
+        tc.message_id,
+        tc.tool_name,
+        tc.arguments_json,
+        tc.status.as_str(),
+        tc.output,
+        tc.permission_decision.as_str(),
+        tc.created_at,
+    ])?;
+    Ok(())
+}
+
 impl Database {
     /// Persist a tool call record linked to `message_id`.
     pub fn insert_tool_call(&self, tc: &ToolCallRecord) -> Result<()> {
-        self.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO tool_calls (id, message_id, tool_name, arguments_json, status, output, permission_decision, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    tc.id,
-                    tc.message_id,
-                    tc.tool_name,
-                    tc.arguments_json,
-                    tc.status.as_str(),
-                    tc.output,
-                    tc.permission_decision.as_str(),
-                    tc.created_at,
-                ],
-            )?;
-            Ok(())
-        })
+        self.with_conn(|conn| insert_tool_call_conn(conn, tc))
     }
 
-    /// Batch-fetch tool calls for many `message_ids` in one query (avoids N+1 queries).
+    /// Batch-fetch tool calls for many `message_ids` in chunked queries (avoids N+1 and variable limits).
     pub fn list_tool_calls_for_messages(
         &self,
         message_ids: &[&str],
@@ -42,23 +46,21 @@ impl Database {
             return Ok(map);
         }
 
-        let placeholders = vec!["?"; message_ids.len()].join(",");
-        let sql = format!(
-            "SELECT id, message_id, tool_name, arguments_json, status, output, permission_decision, created_at
-             FROM tool_calls
-             WHERE message_id IN ({placeholders})
-             ORDER BY created_at ASC"
-        );
-
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(
-                rusqlite::params_from_iter(message_ids.iter()),
-                map_tool_call,
-            )?;
-            for row in rows {
-                let tc = row?;
-                map.entry(tc.message_id.clone()).or_default().push(tc);
+            for chunk in message_ids.chunks(SQLITE_VAR_CHUNK) {
+                let placeholders = vec!["?"; chunk.len()].join(",");
+                let sql = format!(
+                    "SELECT id, message_id, tool_name, arguments_json, status, output, permission_decision, created_at
+                     FROM tool_calls
+                     WHERE message_id IN ({placeholders})
+                     ORDER BY created_at ASC"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), map_tool_call)?;
+                for row in rows {
+                    let tc = row?;
+                    map.entry(tc.message_id.clone()).or_default().push(tc);
+                }
             }
             Ok(map)
         })

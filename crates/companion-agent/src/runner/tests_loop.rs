@@ -26,12 +26,8 @@ impl MockModelProvider {
 impl ModelProvider for MockModelProvider {
     fn stream_chat(
         &self,
-        _model_path: String,
-        _messages: Vec<ChatTurn>,
-        _params: InferenceParams,
-        cancel: Arc<AtomicBool>,
-        tx: mpsc::UnboundedSender<ChatEvent>,
-    ) -> anyhow::Result<()> {
+        req: companion_core::provider::ChatRequest,
+    ) -> Result<(), companion_core::provider::ProviderError> {
         let events = self
             .steps
             .lock()
@@ -39,10 +35,10 @@ impl ModelProvider for MockModelProvider {
             .pop_front()
             .unwrap_or_else(|| vec![ChatEvent::Done]);
         for ev in events {
-            if cancel.load(Ordering::Relaxed) {
+            if req.cancel_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let _ = tx.send(ev);
+            let _ = req.tx.send(ev);
         }
         Ok(())
     }
@@ -107,7 +103,9 @@ pub(super) fn run_agent(
 ) -> Vec<AgentEvent> {
     let runner = AgentRunner {
         provider: Arc::new(provider),
-        registry: ToolRegistry::with_builtins(),
+        registry: ToolRegistry::with_builtins(Arc::new(
+            crate::web_search::WebSearchService::new().expect("web search"),
+        )),
         permissions: PermissionEngine::new(),
         approver,
         db: db.clone(),
@@ -130,7 +128,11 @@ pub(super) fn run_agent(
 #[test]
 fn single_turn_streaming_persists_message_and_usage() {
     let db = Database::open_in_memory().unwrap();
-    let conv = db.create_conversation("Single Turn").unwrap();
+    let conv = db
+        .create_conversation(companion_storage::NewConversation::with_title(
+            "Single Turn",
+        ))
+        .unwrap();
     let provider = MockModelProvider::new(vec![vec![
         ChatEvent::ReasoningToken("pondering".into()),
         ChatEvent::Token("Final reply".into()),
@@ -190,7 +192,9 @@ fn multi_step_tool_call_executes_and_feeds_result_back() {
     std::fs::write(&f, "secret-value").unwrap();
 
     let db = Database::open_in_memory().unwrap();
-    let conv = db.create_conversation("Tool Loop").unwrap();
+    let conv = db
+        .create_conversation(companion_storage::NewConversation::with_title("Tool Loop"))
+        .unwrap();
     let provider = MockModelProvider::new(vec![
         vec![
             ChatEvent::Token(format!(
@@ -237,7 +241,9 @@ fn denied_tool_call_does_not_execute_and_records_denial() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let db = Database::open_in_memory().unwrap();
-    let conv = db.create_conversation("Deny Tool").unwrap();
+    let conv = db
+        .create_conversation(companion_storage::NewConversation::with_title("Deny Tool"))
+        .unwrap();
     let provider = MockModelProvider::new(vec![
         vec![
             ChatEvent::Token(
@@ -279,7 +285,9 @@ fn denied_tool_call_does_not_execute_and_records_denial() {
 #[test]
 fn cancelled_empty_run_skips_persistence() {
     let db = Database::open_in_memory().unwrap();
-    let conv = db.create_conversation("Cancelled").unwrap();
+    let conv = db
+        .create_conversation(companion_storage::NewConversation::with_title("Cancelled"))
+        .unwrap();
     let cfg = base_config(&conv.id, vec![], false);
     cfg.cancel_flag.store(true, Ordering::Relaxed);
 
@@ -310,7 +318,9 @@ fn max_agent_steps_caps_infinite_tool_loops() {
     let dir = std::env::temp_dir().join(format!("companion_runner_cap_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = Database::open_in_memory().unwrap();
-    let conv = db.create_conversation("Step Cap").unwrap();
+    let conv = db
+        .create_conversation(companion_storage::NewConversation::with_title("Step Cap"))
+        .unwrap();
 
     let loop_call = "<tool_call>{\"name\":\"list_files\",\"arguments\":{}}</tool_call>";
     let steps = (0..MAX_AGENT_STEPS)
@@ -342,4 +352,29 @@ fn max_agent_steps_caps_infinite_tool_loops() {
         AgentEvent::Notice(msg) if msg.contains("maximum tool call steps")
     )));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn empty_reply_not_persisted_on_inference_error() {
+    let db = Database::open_in_memory().unwrap();
+    let conv = db
+        .create_conversation(companion_storage::NewConversation::with_title("Err Test"))
+        .unwrap();
+    let provider = MockModelProvider::new(vec![vec![ChatEvent::Error("boom".into())]]);
+    let events = run_agent(
+        provider,
+        Arc::new(MockApprovalHandler::new(vec![])),
+        &db,
+        base_config(&conv.id, vec![], false),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Finished { empty: true, .. }))
+    );
+    assert!(
+        db.list_messages_page(&conv.id, None, 20)
+            .unwrap()
+            .is_empty()
+    );
 }

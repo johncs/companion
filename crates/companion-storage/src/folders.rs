@@ -2,13 +2,26 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
 use companion_core::types::FolderPermission;
 
 use super::Database;
 use super::entities::ConversationFolder;
+
+const FOLDER_COLUMNS: &str = "id, conversation_id, folder_path, permission_mode, created_at";
+
+fn map_folder(row: &Row<'_>) -> rusqlite::Result<ConversationFolder> {
+    let mode_raw: String = row.get(3)?;
+    Ok(ConversationFolder {
+        id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        folder_path: row.get(2)?,
+        permission_mode: FolderPermission::from_str_lossy(&mode_raw),
+        created_at: row.get(4)?,
+    })
+}
 
 impl Database {
     /// Grant folder access to a conversation (deduplicated by `folder_path`, defaults to `Read`).
@@ -17,24 +30,14 @@ impl Database {
         conversation_id: &str,
         folder_path: &str,
     ) -> Result<ConversationFolder> {
-        self.with_conn(|conn| {
-            if let Some(existing) = conn
-                .query_row(
-                    "SELECT id, conversation_id, folder_path, permission_mode, created_at
-                     FROM conversation_folders
-                     WHERE conversation_id = ?1 AND folder_path = ?2",
-                    params![conversation_id, folder_path],
-                    |row| {
-                        let mode_raw: String = row.get(3)?;
-                        Ok(ConversationFolder {
-                            id: row.get(0)?,
-                            conversation_id: row.get(1)?,
-                            folder_path: row.get(2)?,
-                            permission_mode: FolderPermission::from_str_lossy(&mode_raw),
-                            created_at: row.get(4)?,
-                        })
-                    },
-                )
+        self.with_tx(|tx| {
+            let select_sql = format!(
+                "SELECT {FOLDER_COLUMNS} FROM conversation_folders
+                 WHERE conversation_id = ?1 AND folder_path = ?2"
+            );
+            if let Some(existing) = tx
+                .prepare_cached(&select_sql)?
+                .query_row(params![conversation_id, folder_path], map_folder)
                 .optional()?
             {
                 return Ok(existing);
@@ -47,17 +50,17 @@ impl Database {
                 permission_mode: FolderPermission::Read,
                 created_at: Utc::now().timestamp_millis(),
             };
-            conn.execute(
+            tx.prepare_cached(
                 "INSERT INTO conversation_folders (id, conversation_id, folder_path, permission_mode, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    entry.id,
-                    entry.conversation_id,
-                    entry.folder_path,
-                    entry.permission_mode.as_str(),
-                    entry.created_at,
-                ],
-            )?;
+            )?
+            .execute(params![
+                entry.id,
+                entry.conversation_id,
+                entry.folder_path,
+                entry.permission_mode.as_str(),
+                entry.created_at,
+            ])?;
             Ok(entry)
         })
     }
@@ -68,22 +71,13 @@ impl Database {
         conversation_id: &str,
     ) -> Result<Vec<ConversationFolder>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, conversation_id, folder_path, permission_mode, created_at
-                 FROM conversation_folders
+            let sql = format!(
+                "SELECT {FOLDER_COLUMNS} FROM conversation_folders
                  WHERE conversation_id = ?1
-                 ORDER BY created_at ASC",
-            )?;
-            let rows = stmt.query_map(params![conversation_id], |row| {
-                let mode_raw: String = row.get(3)?;
-                Ok(ConversationFolder {
-                    id: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    folder_path: row.get(2)?,
-                    permission_mode: FolderPermission::from_str_lossy(&mode_raw),
-                    created_at: row.get(4)?,
-                })
-            })?;
+                 ORDER BY created_at ASC"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(params![conversation_id], map_folder)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(Into::into)
         })

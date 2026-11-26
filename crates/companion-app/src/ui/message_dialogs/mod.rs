@@ -2,6 +2,7 @@
 
 mod edit_dialog;
 mod info_dialog;
+mod view_model;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -19,4 +20,12 @@ pub fn copy_text_with_feedback(btn: &gtk::Button, text: &str) {
             b.set_icon_name("edit-copy-symbolic");
         }
     });
+}
+
+pub(super) fn format_timestamp_text(created_at_ms: i64) -> String {
+    glib::DateTime::from_unix_utc(created_at_ms / 1000)
+        .and_then(|dt| dt.to_local())
+        .and_then(|local| local.format("%x · %X"))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| "—".to_string())
 }

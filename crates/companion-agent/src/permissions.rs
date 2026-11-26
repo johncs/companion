@@ -62,13 +62,11 @@ impl PermissionEngine {
         }
         if decision == PermissionDecision::AllowChat
             && let Some(folder) = folder_path
-            && let Ok(mut guard) = self.session_allows.lock()
         {
-            guard.insert((
-                conv_id.to_string(),
-                canonicalize_scope(folder),
-                tool_name.to_string(),
-            ));
+            let canon = canonicalize_scope(folder);
+            if let Ok(mut guard) = self.session_allows.lock() {
+                guard.insert((conv_id.to_string(), canon, tool_name.to_string()));
+            }
         }
     }
 }

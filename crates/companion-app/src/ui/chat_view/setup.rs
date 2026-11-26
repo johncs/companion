@@ -1,11 +1,14 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use relm4::prelude::*;
 
 use crate::core::ThinkingLevel;
-use crate::storage::{AttachmentRecord, Database};
+use crate::core::types::StagedAttachment;
+use crate::services::AppServices;
+use crate::storage::AttachmentRecord;
 use crate::ui::composer::{ComposerModel, ComposerOutput};
 use crate::ui::message_row::build_message_list_factory;
 
@@ -27,6 +30,7 @@ pub enum ChatViewMsg {
     OpenFolderPermissions,
     GrantFolder(PathBuf),
     PresentGrantFolderDialog {
+        conv_id: String,
         folder_name: String,
         folder_str: String,
     },
@@ -38,7 +42,7 @@ pub enum ChatViewMsg {
     SendMessage {
         text: String,
         thinking_level: ThinkingLevel,
-        attachments: Vec<AttachmentRecord>,
+        attachments: Vec<StagedAttachment>,
     },
     SendPrepared {
         conv_id: String,
@@ -60,7 +64,7 @@ pub enum ChatViewMsg {
     DeleteMessageFrom(String),
     DeleteCompleted {
         conv_id: String,
-        pos: u32,
+        message_id: String,
         result: Result<(), String>,
     },
     StopGeneration,
@@ -84,6 +88,7 @@ pub enum ChatViewMsg {
         title: String,
     },
     OpenModelSettings,
+    ModelContextLengthChanged(u32),
     ShowToast(String),
 }
 
@@ -98,6 +103,7 @@ pub enum ChatViewOutput {
         conversation_id: String,
         is_running: bool,
     },
+    ModelContextLengthChanged(u32),
     OpenModelSettings,
 }
 
@@ -124,12 +130,12 @@ pub(super) fn build_chat_list_factory(
 }
 
 pub(super) fn build_chat_composer(
-    db: Database,
+    services: Arc<AppServices>,
     active_model_id: Option<String>,
     sender: &ComponentSender<ChatViewModel>,
 ) -> Controller<ComposerModel> {
     ComposerModel::builder()
-        .launch((db, active_model_id))
+        .launch((services, active_model_id))
         .forward(sender.input_sender(), |output| match output {
             ComposerOutput::Send {
                 text,
@@ -146,6 +152,9 @@ pub(super) fn build_chat_composer(
             ComposerOutput::WebSearchToggled(enabled) => ChatViewMsg::WebSearchToggled(enabled),
             ComposerOutput::SystemPromptChanged(p) => ChatViewMsg::SystemPromptChanged(p),
             ComposerOutput::ThinkingLevelChanged(lvl) => ChatViewMsg::ThinkingLevelChanged(lvl),
+            ComposerOutput::ModelContextLengthChanged(n_ctx) => {
+                ChatViewMsg::ModelContextLengthChanged(n_ctx)
+            }
             ComposerOutput::OpenModelSettings => ChatViewMsg::OpenModelSettings,
             ComposerOutput::ShowToast(msg) => ChatViewMsg::ShowToast(msg),
         })

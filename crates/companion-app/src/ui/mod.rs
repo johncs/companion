@@ -3,14 +3,17 @@
 pub mod chat_controls_dialog;
 pub mod chat_view;
 pub mod composer;
+pub mod dialog_scaffold;
 pub mod folder_permissions_dialog;
 pub mod hf_browser;
 pub mod icons;
+pub mod media_widgets;
 pub mod mention_picker;
 pub mod message_dialogs;
 pub mod message_object;
 pub mod message_row;
 pub mod model_config_dialog;
+mod model_config_form_state;
 pub mod model_manager;
 pub mod permission_dialog;
 pub mod preferences;
@@ -18,6 +21,7 @@ pub mod sidebar;
 pub mod sidebar_rows;
 pub mod widgets;
 pub mod window;
+mod window_settings;
 
 use gtk::gdk;
 

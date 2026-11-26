@@ -4,9 +4,27 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use thiserror::Error;
 use tokio::sync::broadcast;
 
 use super::{DownloadKey, DownloadRequest, DownloadSummary};
+
+/// Typed errors produced during model download transfers.
+#[derive(Debug, Error)]
+pub enum DownloadError {
+    #[error("Download cancelled")]
+    Cancelled,
+    #[error("Download failed with HTTP status {0}")]
+    HttpStatus(u16),
+    #[error("Incomplete transfer: downloaded {downloaded} of {expected} bytes")]
+    IncompleteTransfer { downloaded: u64, expected: u64 },
+    #[error("Invalid download target path: {0}")]
+    InvalidPath(String),
+    #[error("Filesystem I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Network error: {0}")]
+    Network(String),
+}
 
 /// Mutually exclusive lifecycle state of a model download.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +64,7 @@ pub(super) struct ActiveDownloadEntry {
     pub(super) total: Option<u64>,
     pub(super) status: DownloadStatus,
     pub(super) stop_flag: Arc<AtomicBool>,
+    pub(super) worker_done: Option<tokio::sync::watch::Receiver<bool>>,
     pub(super) attempt_id: u64,
     pub(super) tx: broadcast::Sender<DownloadSnapshot>,
 }
@@ -68,6 +87,7 @@ impl ActiveDownloadEntry {
             total,
             status,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            worker_done: None,
             attempt_id: 0,
             tx,
         }

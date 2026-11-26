@@ -1,7 +1,7 @@
 //! Chat template family detection, thinking directives, and Gemma4/ChatML formatting.
 
 use companion_core::ThinkingLevel;
-use companion_core::provider::ChatTurn;
+use companion_core::provider::{ChatRole, ChatTurn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ChatTemplateFamily {
@@ -16,7 +16,9 @@ pub(super) fn detect_template_family(template_src: &str) -> ChatTemplateFamily {
         || template_src.contains("<|turn>")
     {
         ChatTemplateFamily::Gemma4
-    } else if template_src.contains("enable_thinking") || template_src.contains("/no_think") {
+    } else if template_src.contains("enable_thinking")
+        || (template_src.contains("/no_think") && template_src.contains("<|im_start|>"))
+    {
         ChatTemplateFamily::QwenThinking
     } else {
         ChatTemplateFamily::Generic
@@ -29,12 +31,12 @@ pub(super) fn prepare_turns(
     has_vision: bool,
     media_marker: &str,
     family: ChatTemplateFamily,
-) -> Vec<(String, String)> {
-    let mut prepared: Vec<(String, String)> = messages
+) -> Vec<(ChatRole, String)> {
+    let mut prepared: Vec<(ChatRole, String)> = messages
         .iter()
         .map(|m| {
             let content = attach_image_markers(&m.content, &m.images, has_vision, media_marker);
-            (m.role.as_str().to_string(), content)
+            (m.role, content)
         })
         .collect();
 
@@ -68,13 +70,16 @@ fn attach_image_markers(
 }
 
 fn apply_thinking_directives(
-    prepared: &mut Vec<(String, String)>,
+    prepared: &mut Vec<(ChatRole, String)>,
     thinking_level: ThinkingLevel,
     family: ChatTemplateFamily,
 ) {
     if thinking_level == ThinkingLevel::Off {
         if family == ChatTemplateFamily::QwenThinking
-            && let Some((_, content)) = prepared.iter_mut().rev().find(|(r, _)| r == "user")
+            && let Some((_, content)) = prepared
+                .iter_mut()
+                .rev()
+                .find(|(r, _)| *r == ChatRole::User)
         {
             content.push_str(" /no_think");
         }
@@ -85,7 +90,21 @@ fn apply_thinking_directives(
         return;
     };
 
-    let directive = if family == ChatTemplateFamily::Gemma4 {
+    let directive = build_thinking_directive(family, effort);
+    insert_thinking_directive(prepared, family, effort, directive);
+
+    if family == ChatTemplateFamily::QwenThinking
+        && let Some((_, content)) = prepared
+            .iter_mut()
+            .rev()
+            .find(|(r, _)| *r == ChatRole::User)
+    {
+        content.push_str(" /think");
+    }
+}
+
+fn build_thinking_directive(family: ChatTemplateFamily, effort: &str) -> String {
+    if family == ChatTemplateFamily::Gemma4 {
         format!(
             "<|think|>\nReasoning effort: {effort}. Think step by step before giving your final answer."
         )
@@ -93,23 +112,33 @@ fn apply_thinking_directives(
         format!(
             "Reasoning effort: {effort}. Show your step-by-step thinking inside <think>...</think> tags before your final answer."
         )
-    };
+    }
+}
 
-    if let Some((_, sys)) = prepared.iter_mut().find(|(r, _)| r == "system") {
-        if family == ChatTemplateFamily::Gemma4 && !sys.starts_with("<|think|>") {
-            *sys = format!("{directive}\n\n{sys}");
-        } else if family != ChatTemplateFamily::Gemma4 {
+fn insert_thinking_directive(
+    prepared: &mut Vec<(ChatRole, String)>,
+    family: ChatTemplateFamily,
+    effort: &str,
+    directive: String,
+) {
+    if let Some((_, sys)) = prepared.iter_mut().find(|(r, _)| *r == ChatRole::System) {
+        if family == ChatTemplateFamily::Gemma4 {
+            if let Some(rest) = sys.strip_prefix("<|think|>") {
+                let rest = rest.trim_start_matches('\n');
+                if !rest.contains("Reasoning effort:") {
+                    *sys = format!(
+                        "<|think|>\nReasoning effort: {effort}. Think step by step before giving your final answer.\n\n{rest}"
+                    );
+                }
+            } else {
+                *sys = format!("{directive}\n\n{sys}");
+            }
+        } else {
             sys.push_str("\n\n");
             sys.push_str(&directive);
         }
     } else {
-        prepared.insert(0, ("system".to_string(), directive));
-    }
-
-    if family == ChatTemplateFamily::QwenThinking
-        && let Some((_, content)) = prepared.iter_mut().rev().find(|(r, _)| r == "user")
-    {
-        content.push_str(" /think");
+        prepared.insert(0, (ChatRole::System, directive));
     }
 }
 
@@ -124,15 +153,14 @@ fn thinking_effort_label(level: ThinkingLevel) -> Option<&'static str> {
 }
 
 pub(super) fn format_gemma4_prompt(
-    prepared: &[(String, String)],
+    prepared: &[(ChatRole, String)],
     thinking_level: ThinkingLevel,
 ) -> (String, Option<&'static str>) {
     let mut out = String::new();
     for (role, content) in prepared {
-        let gemma_role = if role == "assistant" {
-            "model"
-        } else {
-            role.as_str()
+        let gemma_role = match role {
+            ChatRole::Assistant => "model",
+            _ => role.as_str(),
         };
         out.push_str(&format!("<|turn>{gemma_role}\n{content}<turn|>\n"));
     }
@@ -147,15 +175,21 @@ pub(super) fn format_gemma4_prompt(
 }
 
 pub(super) fn format_chatml_fallback(
-    prepared: &[(String, String)],
+    prepared: &[(ChatRole, String)],
+    family: ChatTemplateFamily,
     thinking_level: ThinkingLevel,
 ) -> (String, Option<&'static str>) {
     let mut fallback = String::new();
     for (role, content) in prepared {
-        fallback.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+        fallback.push_str(&format!(
+            "<|im_start|>{}\n{content}<|im_end|>\n",
+            role.as_str()
+        ));
     }
     fallback.push_str("<|im_start|>assistant\n");
-    let initial_close = if thinking_effort_label(thinking_level).is_some() {
+    let initial_close = if family == ChatTemplateFamily::QwenThinking
+        && thinking_effort_label(thinking_level).is_some()
+    {
         fallback.push_str("<think>\n");
         Some("</think>")
     } else {

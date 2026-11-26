@@ -13,6 +13,7 @@ use crate::registry::ModelRegistryService;
 
 pub(super) struct FetchJob<'a> {
     pub(super) key: &'a DownloadKey,
+    pub(super) attempt_id: u64,
     pub(super) dest_path: &'a Path,
     pub(super) mmproj_name: Option<&'a str>,
     pub(super) mmproj_dest: Option<&'a Path>,
@@ -32,8 +33,10 @@ pub(super) struct CompletionInfo {
 struct DualProgressAggregator {
     done_main: AtomicU64,
     total_main: AtomicU64,
+    has_total_main: AtomicBool,
     done_mmproj: AtomicU64,
     total_mmproj: AtomicU64,
+    has_total_mmproj: AtomicBool,
     emit: ProgressCb,
 }
 
@@ -42,8 +45,10 @@ impl DualProgressAggregator {
         Arc::new(Self {
             done_main: AtomicU64::new(0),
             total_main: AtomicU64::new(0),
+            has_total_main: AtomicBool::new(false),
             done_mmproj: AtomicU64::new(0),
             total_mmproj: AtomicU64::new(0),
+            has_total_mmproj: AtomicBool::new(false),
             emit,
         })
     }
@@ -53,18 +58,31 @@ impl DualProgressAggregator {
             self.done_mmproj.store(done, Ordering::Relaxed);
             if let Some(t) = total {
                 self.total_mmproj.store(t, Ordering::Relaxed);
+                self.has_total_mmproj.store(true, Ordering::Relaxed);
             }
         } else {
             self.done_main.store(done, Ordering::Relaxed);
             if let Some(t) = total {
                 self.total_main.store(t, Ordering::Relaxed);
+                self.has_total_main.store(true, Ordering::Relaxed);
             }
         }
-        let tot =
-            self.total_main.load(Ordering::Relaxed) + self.total_mmproj.load(Ordering::Relaxed);
-        let done_sum =
-            self.done_main.load(Ordering::Relaxed) + self.done_mmproj.load(Ordering::Relaxed);
-        (self.emit)(done_sum, (tot > 0).then_some(tot));
+        let both_totals = self.has_total_main.load(Ordering::Relaxed)
+            && self.has_total_mmproj.load(Ordering::Relaxed);
+        let tot = if both_totals {
+            Some(
+                self.total_main
+                    .load(Ordering::Relaxed)
+                    .saturating_add(self.total_mmproj.load(Ordering::Relaxed)),
+            )
+        } else {
+            None
+        };
+        let done_sum = self
+            .done_main
+            .load(Ordering::Relaxed)
+            .saturating_add(self.done_mmproj.load(Ordering::Relaxed));
+        (self.emit)(done_sum, tot);
     }
 
     fn callback(self: &Arc<Self>, is_mmproj: bool) -> ProgressCb {
@@ -78,6 +96,7 @@ fn build_progress_cb(inner: &Arc<DownloadManagerInner>, job: &FetchJob<'_>) -> P
     let inner_cb = inner.clone();
     let key_cb = job.key.clone();
     let persist_total = job.persist_total;
+    let attempt_id = job.attempt_id;
 
     Arc::new(move |done: u64, total: Option<u64>| {
         if persist_total
@@ -88,13 +107,42 @@ fn build_progress_cb(inner: &Arc<DownloadManagerInner>, job: &FetchJob<'_>) -> P
             let db_c = inner_cb.db.clone();
             let (r, f) = key_cb.clone();
             tokio::task::spawn_blocking(move || {
-                let _ = db_c.update_pending_download_total(&r, &f, t);
+                if let Err(err) = db_c.update_pending_download_total(&r, &f, t) {
+                    tracing::warn!("Failed to update pending download total: {err}");
+                }
             });
         }
-        inner_cb
-            .active
-            .with_entry(&key_cb, |entry| entry.update_progress(done, total));
+        inner_cb.active.with_entry(&key_cb, |entry| {
+            if entry.attempt_id == attempt_id && entry.status == DownloadStatus::Active {
+                entry.update_progress(done, total);
+            }
+        });
     })
+}
+
+async fn fetch_or_reuse_existing(
+    inner: &Arc<DownloadManagerInner>,
+    repo_id: &str,
+    filename: &str,
+    dest_path: &Path,
+    stop_flag: Arc<AtomicBool>,
+    progress: ProgressCb,
+) -> Result<()> {
+    if let Ok(meta) = tokio::fs::metadata(dest_path).await
+        && meta.is_file()
+        && meta.len() > 0
+    {
+        progress(meta.len(), Some(meta.len()));
+        return Ok(());
+    }
+    let res = inner
+        .fetcher
+        .fetch(repo_id, filename, dest_path, stop_flag.clone(), progress)
+        .await;
+    if res.is_err() {
+        stop_flag.store(true, Ordering::Relaxed);
+    }
+    res
 }
 
 pub(super) async fn run_fetch_job(
@@ -106,40 +154,22 @@ pub(super) async fn run_fetch_job(
 
     if let (Some(mm_file), Some(mm_path)) = (job.mmproj_name, job.mmproj_dest) {
         let agg = DualProgressAggregator::new(update_progress);
-        let stop_main = job.stop_flag.clone();
-        let stop_mm = job.stop_flag.clone();
-        let f_main = async {
-            let res = inner
-                .fetcher
-                .fetch(
-                    repo_id,
-                    filename,
-                    job.dest_path,
-                    stop_main.clone(),
-                    agg.callback(false),
-                )
-                .await;
-            if res.is_err() {
-                stop_main.store(true, Ordering::Relaxed);
-            }
-            res
-        };
-        let f_mm = async {
-            let res = inner
-                .fetcher
-                .fetch(
-                    repo_id,
-                    mm_file,
-                    mm_path,
-                    stop_mm.clone(),
-                    agg.callback(true),
-                )
-                .await;
-            if res.is_err() {
-                stop_mm.store(true, Ordering::Relaxed);
-            }
-            res
-        };
+        let f_main = fetch_or_reuse_existing(
+            inner,
+            repo_id,
+            filename,
+            job.dest_path,
+            job.stop_flag.clone(),
+            agg.callback(false),
+        );
+        let f_mm = fetch_or_reuse_existing(
+            inner,
+            repo_id,
+            mm_file,
+            mm_path,
+            job.stop_flag.clone(),
+            agg.callback(true),
+        );
         let ((), ()) = tokio::try_join!(f_main, f_mm)?;
         Ok(())
     } else {
@@ -163,8 +193,23 @@ pub(super) async fn handle_fetch_completion(
 ) {
     match res {
         Ok(()) => {
+            let stale_or_cancelled = inner
+                .active
+                .with_entry(&info.key, |e| {
+                    e.attempt_id != info.attempt_id || e.status == DownloadStatus::Cancelled
+                })
+                .unwrap_or(true);
+            if stale_or_cancelled {
+                return;
+            }
             let reg_res = register_completed_model(inner, &info).await;
-            if let Some(mut entry) = inner.active.remove(&info.key) {
+            let removed = inner.active.with_map(|map| {
+                let matches = map.get(&info.key).is_some_and(|e| {
+                    e.attempt_id == info.attempt_id && e.status != DownloadStatus::Cancelled
+                });
+                if matches { map.remove(&info.key) } else { None }
+            });
+            if let Some(mut entry) = removed {
                 entry.status = match reg_res {
                     Ok(()) => DownloadStatus::Completed,
                     Err(err) => DownloadStatus::Failed(err),
@@ -227,40 +272,56 @@ async fn handle_fetch_error(
     info: CompletionInfo,
     err: anyhow::Error,
 ) {
-    let Some((status, current_attempt)) = inner
-        .active
-        .with_entry(&info.key, |e| (e.status.clone(), e.attempt_id))
-    else {
-        return;
-    };
-
-    if current_attempt != info.attempt_id {
-        return;
+    enum ErrorAction {
+        Ignore,
+        EmitPaused,
+        Finish(Box<super::state::ActiveDownloadEntry>, bool),
     }
 
-    if status == DownloadStatus::Paused {
-        inner.active.with_entry(&info.key, |e| e.emit());
-        return;
-    }
+    let action = inner.active.with_map(|map| {
+        let Some(entry) = map.get_mut(&info.key) else {
+            return ErrorAction::Ignore;
+        };
+        if entry.attempt_id != info.attempt_id {
+            return ErrorAction::Ignore;
+        }
+        if entry.status == DownloadStatus::Paused {
+            entry.emit();
+            return ErrorAction::EmitPaused;
+        }
+        let was_cancelled = entry.status == DownloadStatus::Cancelled;
+        match map.remove(&info.key) {
+            Some(removed) => ErrorAction::Finish(Box::new(removed), was_cancelled),
+            None => ErrorAction::Ignore,
+        }
+    });
 
-    let Some(mut entry) = inner.active.remove(&info.key) else {
+    let ErrorAction::Finish(mut entry, was_cancelled) = action else {
         return;
     };
-    if status == DownloadStatus::Cancelled {
-        remove_part_file(&info.dest_path).await;
-        if let Some(mp) = info.mmproj_dest {
-            remove_part_file(&mp).await;
-        }
-        if info.attach_to_model_id.is_none() {
-            let db_c = inner.db.clone();
-            let (r, f) = info.key;
-            let _ = tokio::task::spawn_blocking(move || db_c.remove_pending_download(&r, &f)).await;
-        }
+    if was_cancelled {
+        cleanup_cancelled_download(inner, info).await;
         entry.status = DownloadStatus::Cancelled;
     } else {
         entry.status = DownloadStatus::Failed(err.to_string());
     }
     entry.emit();
+}
+
+async fn cleanup_cancelled_download(inner: &DownloadManagerInner, info: CompletionInfo) {
+    remove_part_file(&info.dest_path).await;
+    if let Some(mp) = info.mmproj_dest {
+        remove_part_file(&mp).await;
+    }
+    if info.attach_to_model_id.is_none() {
+        let db_c = inner.db.clone();
+        let (r, f) = info.key;
+        if let Ok(Err(err)) =
+            tokio::task::spawn_blocking(move || db_c.remove_pending_download(&r, &f)).await
+        {
+            tracing::warn!("Failed to remove cancelled pending download: {err}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -283,9 +344,6 @@ mod tests {
         agg.record(false, 100, None);
 
         let events = seen.lock().unwrap().clone();
-        assert_eq!(
-            events,
-            vec![(50, Some(100)), (70, Some(140)), (120, Some(140))]
-        );
+        assert_eq!(events, vec![(50, None), (70, Some(140)), (120, Some(140))]);
     }
 }

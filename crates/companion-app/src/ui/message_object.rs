@@ -9,17 +9,19 @@ use gtk::subclass::prelude::*;
 use std::sync::OnceLock;
 
 use crate::core::ThinkingLevel;
-use crate::core::markdown::{
+use crate::core::types::{ExecutionDevice, MessageRole};
+use crate::format::markdown::{
     CodeHighlightCache, MarkdownBlock, parse_markdown_blocks, parse_markdown_blocks_cached,
     parse_markdown_blocks_streaming,
 };
-use crate::core::types::{ExecutionDevice, MessageRole};
 use crate::storage::entities::Message;
 use crate::storage::{AttachmentRecord, ToolCallRecord};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MessageEntry {
     pub id: String,
+    /// Stable UI key preserved across `finalize_persisted` ID swaps so rows aren't rebuilt.
+    pub render_key: String,
     pub role: MessageRole,
     pub content: String,
     pub reasoning_content: Option<String>,
@@ -41,7 +43,7 @@ mod imp {
 
     #[derive(Default)]
     pub struct MessageObject {
-        pub entry: RefCell<Option<MessageEntry>>,
+        pub entry: RefCell<MessageEntry>,
         pub code_cache: RefCell<CodeHighlightCache>,
     }
 
@@ -57,6 +59,17 @@ mod imp {
             SIGNALS.get_or_init(|| vec![Signal::builder("updated").build()])
         }
     }
+}
+
+/// Persisted metadata and optional pre-parsed blocks for [`MessageObject::finalize_persisted_with_blocks`].
+pub struct FinalizedMessage<'a> {
+    pub saved_id: Option<&'a str>,
+    pub created_at: Option<i64>,
+    pub final_answer: &'a str,
+    pub final_reasoning: Option<&'a str>,
+    pub total_tokens: i64,
+    pub elapsed_ms: i64,
+    pub pre_rendered: Option<Vec<MarkdownBlock>>,
 }
 
 glib::wrapper! {
@@ -88,8 +101,9 @@ impl MessageObject {
         blocks: Vec<MarkdownBlock>,
     ) -> Self {
         let obj: Self = glib::Object::new();
-        *obj.imp().entry.borrow_mut() = Some(MessageEntry {
+        *obj.imp().entry.borrow_mut() = MessageEntry {
             id: msg.id.clone(),
+            render_key: msg.id.clone(),
             role: msg.role,
             content: msg.content.clone(),
             reasoning_content: msg.reasoning_content.clone(),
@@ -104,7 +118,7 @@ impl MessageObject {
             tool_calls,
             is_streaming: false,
             status_text: None,
-        });
+        };
         obj
     }
 
@@ -117,7 +131,8 @@ impl MessageObject {
         created_at: i64,
     ) -> Self {
         let obj: Self = glib::Object::new();
-        *obj.imp().entry.borrow_mut() = Some(MessageEntry {
+        *obj.imp().entry.borrow_mut() = MessageEntry {
+            render_key: id.clone(),
             id,
             role: MessageRole::Assistant,
             content: String::new(),
@@ -133,29 +148,19 @@ impl MessageObject {
             tool_calls: Vec::new(),
             is_streaming: true,
             status_text: Some(crate::i18n::gettext("Starting…")),
-        });
+        };
         obj
     }
 
     /// Append a completed/denied tool call to this message and refresh its bound row.
     pub fn append_tool_call(&self, tc: ToolCallRecord) {
-        {
-            let mut borrow = self.imp().entry.borrow_mut();
-            if let Some(entry) = borrow.as_mut() {
-                entry.tool_calls.push(tc);
-            }
-        }
+        self.imp().entry.borrow_mut().tool_calls.push(tc);
         self.emit_by_name::<()>("updated", &[]);
     }
 
     /// Update only the transient streaming status label (e.g. `"Loading model…"`).
     pub fn set_status(&self, status: Option<&str>) {
-        {
-            let mut borrow = self.imp().entry.borrow_mut();
-            if let Some(entry) = borrow.as_mut() {
-                entry.status_text = status.map(str::to_string);
-            }
-        }
+        self.imp().entry.borrow_mut().status_text = status.map(str::to_string);
         self.emit_by_name::<()>("updated", &[]);
     }
 
@@ -168,10 +173,7 @@ impl MessageObject {
         is_streaming: bool,
     ) {
         let should_emit = {
-            let mut borrow = self.imp().entry.borrow_mut();
-            let Some(entry) = borrow.as_mut() else {
-                return;
-            };
+            let mut entry = self.imp().entry.borrow_mut();
             let content_changed = entry.content != content;
             let streaming_changed = entry.is_streaming != is_streaming;
             let had_status = entry.status_text.is_some();
@@ -193,15 +195,12 @@ impl MessageObject {
     pub fn update_streaming(&self, content: &str, reasoning: Option<&str>, is_streaming: bool) {
         let should_emit = {
             let (content_unchanged, was_streaming, had_status) = {
-                let borrow = self.imp().entry.borrow();
-                match borrow.as_ref() {
-                    Some(e) => (
-                        e.content == content,
-                        e.is_streaming,
-                        e.status_text.is_some(),
-                    ),
-                    None => (true, false, false),
-                }
+                let e = self.imp().entry.borrow();
+                (
+                    e.content == content,
+                    e.is_streaming,
+                    e.status_text.is_some(),
+                )
             };
             let mut cache = self.imp().code_cache.borrow_mut();
             let blocks = if content_unchanged && is_streaming {
@@ -211,8 +210,8 @@ impl MessageObject {
             } else {
                 Some(parse_markdown_blocks_cached(content, &mut cache))
             };
-            let mut borrow = self.imp().entry.borrow_mut();
-            if let Some(entry) = borrow.as_mut() {
+            {
+                let mut entry = self.imp().entry.borrow_mut();
                 if let Some(blocks) = blocks {
                     entry.content = content.to_string();
                     entry.blocks = blocks;
@@ -231,20 +230,36 @@ impl MessageObject {
         }
     }
 
-    /// Apply the authoritative persisted message ID, timestamp, and final content after DB save.
-    pub fn finalize_persisted(
-        &self,
-        saved_id: Option<&str>,
-        created_at: Option<i64>,
-        final_answer: &str,
-        final_reasoning: Option<&str>,
-        total_tokens: i64,
-        elapsed_ms: i64,
-    ) {
-        self.update_streaming(final_answer, final_reasoning, false);
+    /// Apply persisted metadata and pre-parsed [`MarkdownBlock`]s (parsed off the GTK main thread).
+    pub fn finalize_persisted_with_blocks(&self, info: FinalizedMessage<'_>) {
+        let FinalizedMessage {
+            saved_id,
+            created_at,
+            final_answer,
+            final_reasoning,
+            total_tokens,
+            elapsed_ms,
+            pre_rendered,
+        } = info;
         {
-            let mut borrow = self.imp().entry.borrow_mut();
-            if let Some(entry) = borrow.as_mut() {
+            let content_unchanged = self.imp().entry.borrow().content == final_answer;
+            let mut cache = self.imp().code_cache.borrow_mut();
+            let blocks = if content_unchanged {
+                None
+            } else if let Some(b) = pre_rendered {
+                Some(b)
+            } else {
+                Some(parse_markdown_blocks_cached(final_answer, &mut cache))
+            };
+            {
+                let mut entry = self.imp().entry.borrow_mut();
+                if let Some(blocks) = blocks {
+                    entry.content = final_answer.to_string();
+                    entry.blocks = blocks;
+                }
+                entry.reasoning_content = final_reasoning.map(str::to_string);
+                entry.is_streaming = false;
+                entry.status_text = None;
                 if let Some(id) = saved_id {
                     entry.id = id.to_string();
                 }
@@ -254,40 +269,31 @@ impl MessageObject {
                 entry.token_count = total_tokens;
                 entry.generation_ms = Some(elapsed_ms);
             }
+            cache.clear();
         }
         self.emit_by_name::<()>("updated", &[]);
     }
 
-    /// Record completion token count and generation duration (ms) for the Message Info dialog.
-    pub fn set_metrics(&self, token_count: i64, generation_ms: i64) {
-        {
-            let mut borrow = self.imp().entry.borrow_mut();
-            if let Some(entry) = borrow.as_mut() {
-                entry.token_count = token_count;
-                entry.generation_ms = Some(generation_ms);
-            }
-        }
-        self.emit_by_name::<()>("updated", &[]);
+    /// Borrow the underlying [`MessageEntry`] without cloning, returning `None` if already borrowed.
+    pub fn try_with_entry<R>(&self, f: impl FnOnce(&MessageEntry) -> R) -> Option<R> {
+        let borrow = self.imp().entry.try_borrow().ok()?;
+        Some(f(&borrow))
     }
 
     /// Borrow the underlying [`MessageEntry`] without cloning vectors/strings.
-    #[allow(clippy::expect_used)]
     pub fn with_entry<R>(&self, f: impl FnOnce(&MessageEntry) -> R) -> R {
         let borrow = self.imp().entry.borrow();
-        let entry = borrow.as_ref().expect("MessageObject initialized");
-        f(entry)
+        f(&borrow)
     }
 
     /// Replace a user message's displayed text after editing.
     pub fn set_user_content(&self, new_content: &str) {
         {
-            let mut borrow = self.imp().entry.borrow_mut();
-            if let Some(entry) = borrow.as_mut() {
-                entry.content = new_content.to_string();
-                entry.blocks = vec![MarkdownBlock::Text(
-                    glib::markup_escape_text(new_content).to_string(),
-                )];
-            }
+            let mut entry = self.imp().entry.borrow_mut();
+            entry.content = new_content.to_string();
+            entry.blocks = vec![MarkdownBlock::Text(
+                glib::markup_escape_text(new_content).to_string(),
+            )];
         }
         self.emit_by_name::<()>("updated", &[]);
     }
@@ -297,12 +303,51 @@ impl MessageObject {
         self.emit_by_name::<()>("updated", &[]);
     }
 
-    #[allow(clippy::expect_used)]
     pub fn entry(&self) -> MessageEntry {
-        self.imp()
-            .entry
-            .borrow()
-            .clone()
-            .expect("MessageObject initialized")
+        self.imp().entry.borrow().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn finalize_persisted_emits_updated_once_and_preserves_render_key() {
+        let obj =
+            MessageObject::new_streaming("tmp-1".into(), None, Some("test".into()), None, 100);
+        let initial_render_key = obj.with_entry(|e| e.render_key.clone());
+
+        let emits = Rc::new(Cell::new(0u32));
+        let emits_clone = emits.clone();
+        obj.connect_local("updated", false, move |_| {
+            emits_clone.set(emits_clone.get() + 1);
+            None
+        });
+
+        obj.finalize_persisted_with_blocks(FinalizedMessage {
+            saved_id: Some("db-99"),
+            created_at: Some(200),
+            final_answer: "final",
+            final_reasoning: Some("why"),
+            total_tokens: 15,
+            elapsed_ms: 320,
+            pre_rendered: None,
+        });
+
+        assert_eq!(emits.get(), 1);
+        obj.with_entry(|e| {
+            assert_eq!(e.id, "db-99");
+            assert_eq!(e.render_key, initial_render_key);
+            assert_eq!(e.created_at, 200);
+            assert_eq!(e.content, "final");
+            assert_eq!(e.reasoning_content.as_deref(), Some("why"));
+            assert!(!e.is_streaming);
+            assert_eq!(e.status_text, None);
+            assert_eq!(e.token_count, 15);
+            assert_eq!(e.generation_ms, Some(320));
+        });
     }
 }

@@ -5,23 +5,47 @@ use std::path::PathBuf;
 use adw::prelude::*;
 use relm4::prelude::*;
 
-use crate::core::runtime;
 use crate::i18n::{gettext, tr_f};
 use crate::models::friendly_model_name;
 use crate::ui::chat_controls_dialog::{ChatControlsConfig, present_chat_controls_dialog};
 use crate::ui::icons;
+use crate::ui::mention_picker::MentionEntry;
 
 use super::input_helpers::{compute_context_usage_pct, extract_model_n_ctx};
 use super::{ComposerModel, ComposerMsg};
 
 impl ComposerModel {
+    pub(super) fn spawn_init_data_load(&self, sender: &ComponentSender<Self>) {
+        let db = self.services.db.clone();
+        let input_sender = sender.input_sender().clone();
+        self.services.rt_handle.spawn_blocking(move || {
+            let assistant_name = db
+                .get_assistant_name()
+                .unwrap_or_else(|_| "Companion".to_string());
+            let web_search_global_enabled = db.get_web_search_global_enabled().unwrap_or(false);
+            let search_engine = db.get_search_engine().unwrap_or_default();
+            let models = db.list_models().unwrap_or_default();
+            let _ = input_sender.send(ComposerMsg::InitDataLoaded {
+                assistant_name,
+                web_search_global_enabled,
+                search_engine,
+                models,
+            });
+        });
+    }
+
     pub(super) fn sync_mention_files(&self) {
         self.mention_picker.set_files(self.granted_files.clone());
     }
 
-    pub(super) fn refresh_granted_files(&self, sender: &ComponentSender<Self>) {
+    pub(super) fn refresh_granted_files(&mut self, sender: &ComponentSender<Self>) {
+        self.files_seq = self.files_seq.wrapping_add(1);
+        let seq = self.files_seq;
         if self.granted_folders.is_empty() {
-            sender.input(ComposerMsg::GrantedFilesLoaded(Vec::new()));
+            sender.input(ComposerMsg::GrantedFilesLoaded {
+                seq,
+                files: Vec::new(),
+            });
             return;
         }
         let folders: Vec<String> = self
@@ -30,22 +54,35 @@ impl ComposerModel {
             .map(|f| f.folder_path.clone())
             .collect();
         let input_sender = sender.input_sender().clone();
-        runtime().spawn_blocking(move || {
+        self.services.rt_handle.spawn_blocking(move || {
             let mut entries = Vec::new();
             for folder in folders {
                 let root = PathBuf::from(&folder);
                 if root.is_file() {
-                    entries.push(folder);
+                    entries.push(MentionEntry {
+                        path: folder,
+                        is_dir: false,
+                    });
                 } else if root.is_dir() {
-                    entries.push(folder.clone());
+                    entries.push(MentionEntry {
+                        path: folder.clone(),
+                        is_dir: true,
+                    });
                     if let Ok(files) = crate::agent::tools::list_granted_files(&root, ".", 200) {
                         for rel in files {
-                            entries.push(root.join(rel).to_string_lossy().to_string());
+                            let full = root.join(rel);
+                            entries.push(MentionEntry {
+                                is_dir: full.is_dir(),
+                                path: full.to_string_lossy().to_string(),
+                            });
                         }
                     }
                 }
             }
-            let _ = input_sender.send(ComposerMsg::GrantedFilesLoaded(entries));
+            let _ = input_sender.send(ComposerMsg::GrantedFilesLoaded {
+                seq,
+                files: entries,
+            });
         });
     }
 
@@ -58,46 +95,24 @@ impl ComposerModel {
     }
 
     pub(super) fn refresh_attach_button(&self) {
-        if self.active_model_id.is_none() {
-            self.attach_btn.set_sensitive(false);
-            self.attach_btn.set_tooltip_text(Some(&gettext(
-                "Select an AI model in Settings to attach files",
-            )));
-            return;
-        }
-        self.attach_btn.set_sensitive(true);
-        let tip = if self.has_active_model_mmproj() {
-            gettext("Attach files (images, text, PDF)")
-        } else {
-            gettext("Attach text or PDF files (active model has no vision projector for images)")
-        };
+        let (sensitive, tip) = super::view_model::ComposerViewModel::attach_button_state(
+            self.active_model_id.is_some(),
+            self.has_active_model_mmproj(),
+        );
+        self.attach_btn.set_sensitive(sensitive);
         self.attach_btn.set_tooltip_text(Some(&tip));
     }
 
     pub(super) fn refresh_folders_button(&self) {
         self.folders_btn
             .set_child(Some(&icons::symbolic_image("folder-symbolic", 16)));
-        if self.granted_folders.is_empty() {
-            self.folders_btn.set_css_classes(&["flat", "circular"]);
+        let (accent, tip) =
+            super::view_model::ComposerViewModel::folders_button_state(&self.granted_folders);
+        if accent {
             self.folders_btn
-                .set_tooltip_text(Some(&gettext("Files & Folders (none granted)")));
-            return;
-        }
-
-        self.folders_btn
-            .set_css_classes(&["flat", "circular", "accent"]);
-
-        let mut tip = tr_f(
-            "Files & Folders ({count} granted)",
-            &[("count", &self.granted_folders.len().to_string())],
-        );
-        for f in &self.granted_folders {
-            let mode_label = if f.permission_mode.allows_write() {
-                gettext("Read & Write")
-            } else {
-                gettext("Read-Only")
-            };
-            tip.push_str(&format!("\n• {} ({mode_label})", f.folder_path));
+                .set_css_classes(&["flat", "circular", "accent"]);
+        } else {
+            self.folders_btn.set_css_classes(&["flat", "circular"]);
         }
         self.folders_btn.set_tooltip_text(Some(&tip));
     }
@@ -105,31 +120,40 @@ impl ComposerModel {
     pub(super) fn refresh_globe_button(&self) {
         self.globe_btn
             .set_child(Some(&icons::symbolic_image(icons::GLOBE, 16)));
-        if !self.web_search_global_enabled {
-            self.globe_btn.set_sensitive(false);
-            self.globe_btn.set_css_classes(&["flat", "circular"]);
-            self.globe_btn
-                .set_tooltip_text(Some(&gettext("Web Search is disabled in Settings")));
-            return;
-        }
-        self.globe_btn.set_sensitive(true);
-        if self.web_search_enabled {
+        let (sensitive, accent, tip) = super::view_model::ComposerViewModel::globe_button_state(
+            self.web_search_global_enabled,
+            self.web_search_enabled,
+            self.search_engine,
+        );
+        self.globe_btn.set_sensitive(sensitive);
+        if accent {
             self.globe_btn
                 .set_css_classes(&["flat", "circular", "accent"]);
-            let engine = self.db.get_search_engine().unwrap_or_default().label();
-            self.globe_btn.set_tooltip_text(Some(&tr_f(
-                "Web Search (On · {engine})",
-                &[("engine", &engine)],
-            )));
         } else {
             self.globe_btn.set_css_classes(&["flat", "circular"]);
-            self.globe_btn
-                .set_tooltip_text(Some(&gettext("Web Search (Off)")));
         }
+        self.globe_btn.set_tooltip_text(Some(&tip));
     }
 
-    pub(super) fn refresh_controls_button(&mut self) {
-        self.models = self.db.list_models().unwrap_or_default();
+    pub(super) fn refresh_models_cache(&self, sender: &ComponentSender<Self>) {
+        let db = self.services.db.clone();
+        let input_sender = sender.input_sender().clone();
+        self.services.rt_handle.spawn_blocking(move || {
+            let models = db.list_models().unwrap_or_default();
+            let _ = input_sender.send(ComposerMsg::ModelsMetadataLoaded(models));
+        });
+    }
+
+    pub(super) fn refresh_search_engine(&self, sender: &ComponentSender<Self>) {
+        let db = self.services.db.clone();
+        let input_sender = sender.input_sender().clone();
+        self.services.rt_handle.spawn_blocking(move || {
+            let engine = db.get_search_engine().unwrap_or_default();
+            let _ = input_sender.send(ComposerMsg::SearchEngineLoaded(engine));
+        });
+    }
+
+    pub(super) fn refresh_controls_button(&self) {
         let active_name = self
             .active_model_id
             .as_deref()
@@ -159,8 +183,7 @@ impl ComposerModel {
         )));
     }
 
-    pub(super) fn open_chat_controls(&mut self, sender: &ComponentSender<Self>) {
-        self.models = self.db.list_models().unwrap_or_default();
+    pub(super) fn open_chat_controls(&self, sender: &ComponentSender<Self>) {
         let current_ctx = extract_model_n_ctx(&self.models, self.active_model_id.as_deref());
         let active_model = self
             .active_model_id
@@ -172,6 +195,8 @@ impl ComposerModel {
             &self.controls_btn,
             ChatControlsConfig {
                 active_model,
+                gguf_cache: self.services.gguf_cache.clone(),
+                rt_handle: self.services.rt_handle.clone(),
                 assistant_name: &self.assistant_name,
                 current_thinking: self.thinking_level,
                 current_ctx,

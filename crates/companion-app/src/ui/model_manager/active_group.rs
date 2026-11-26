@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::gio;
 
 use crate::i18n::{gettext, tr_f};
 use crate::models::friendly_model_name;
@@ -15,7 +14,7 @@ use super::active_details::{
     ActiveDetailRows, InstalledRowCtx, build_installed_model_row, build_property_row,
     sync_active_model_details,
 };
-use super::inventory::InstalledModelInfo;
+use crate::models::inventory::InstalledModelInfo;
 
 pub(super) fn build_active_group(
     db: &Database,
@@ -26,26 +25,8 @@ pub(super) fn build_active_group(
     DownloadControls,
     gtk::Button,
 ) {
-    let assistant_name = db
-        .get_assistant_name()
-        .unwrap_or_else(|_| "Companion".to_string());
-    let active_group = adw::PreferencesGroup::builder()
-        .title(gettext("Active AI Model"))
-        .description(tr_f(
-            "Set the AI model your companion {name} uses. This setting is applied globally.",
-            &[("name", &assistant_name)],
-        ))
-        .build();
-
-    let active_config_btn = gtk::Button::builder()
-        .icon_name("emblem-system-symbolic")
-        .tooltip_text(gettext(
-            "Model settings (context, GPU layers, vision projector)",
-        ))
-        .valign(gtk::Align::Center)
-        .css_classes(["flat"])
-        .visible(false)
-        .build();
+    let active_group = build_active_group_header(db);
+    let active_config_btn = build_active_config_btn();
     let active_model_row = adw::ComboRow::builder()
         .title(gettext("Selected Model"))
         .sensitive(false)
@@ -62,56 +43,13 @@ pub(super) fn build_active_group(
         .css_classes(["flat"])
         .build();
 
-    let active_file_row = build_property_row(&gettext("File"));
-    active_file_row.add_suffix(&active_open_folder_btn);
-    active_file_row.add_suffix(&active_config_btn);
-    let active_size_row = build_property_row(&gettext("Size"));
-    let active_quant_row = build_property_row(&gettext("Quantization"));
-    let active_ctx_row = build_property_row(&gettext("Max Context"));
-    let active_speed_row = build_property_row(&gettext("Average Speed"));
-    let active_text_row = build_property_row(&gettext("Text Generation"));
-    let active_thinking_row = build_property_row(&gettext("Thinking"));
-    let active_vision_row = build_property_row(&gettext("Vision"));
-    let vision_controls = DownloadControls::new();
-    let vision_action_btn = gtk::Button::builder()
-        .valign(gtk::Align::Center)
-        .visible(false)
-        .build();
-    active_vision_row.add_suffix(&vision_controls.container);
-    active_vision_row.add_suffix(&vision_action_btn);
-    let active_audio_row = build_property_row(&gettext("Audio"));
-
-    for row in [
-        &active_file_row,
-        &active_size_row,
-        &active_quant_row,
-        &active_ctx_row,
-        &active_speed_row,
-        &active_text_row,
-        &active_thinking_row,
-        &active_vision_row,
-        &active_audio_row,
-    ] {
-        details_expander.add_row(row);
-    }
-
-    active_group.add(&active_model_row);
-    active_group.add(&details_expander);
-
-    let active_rows = ActiveDetailRows {
-        config_btn: active_config_btn,
+    let (active_rows, vision_controls) = build_active_detail_rows(
+        &active_config_btn,
+        &active_open_folder_btn,
         details_expander,
-        file_row: active_file_row,
-        size_row: active_size_row,
-        quant_row: active_quant_row,
-        ctx_row: active_ctx_row,
-        speed_row: active_speed_row,
-        text_row: active_text_row,
-        thinking_row: active_thinking_row,
-        vision_row: active_vision_row,
-        vision_action_btn,
-        audio_row: active_audio_row,
-    };
+    );
+    active_group.add(&active_model_row);
+    active_group.add(&active_rows.details_expander);
 
     (
         active_group,
@@ -120,6 +58,93 @@ pub(super) fn build_active_group(
         vision_controls,
         active_open_folder_btn,
     )
+}
+
+fn build_active_group_header(db: &Database) -> adw::PreferencesGroup {
+    let assistant_name = db
+        .get_assistant_name()
+        .unwrap_or_else(|_| "Companion".to_string());
+    adw::PreferencesGroup::builder()
+        .title(gettext("Active AI Model"))
+        .description(tr_f(
+            "Set the AI model your companion {name} uses. This setting is applied globally.",
+            &[(
+                "name",
+                &crate::format::markdown::escape_pango_markup(&assistant_name),
+            )],
+        ))
+        .build()
+}
+
+fn build_active_config_btn() -> gtk::Button {
+    gtk::Button::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text(gettext(
+            "Model settings (context, GPU layers, vision projector)",
+        ))
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .visible(false)
+        .build()
+}
+
+fn build_active_detail_rows(
+    config_btn: &gtk::Button,
+    open_folder_btn: &gtk::Button,
+    details_expander: adw::ExpanderRow,
+) -> (ActiveDetailRows, DownloadControls) {
+    let file_row = build_property_row(&gettext("File"));
+    file_row.add_suffix(open_folder_btn);
+    file_row.add_suffix(config_btn);
+    let size_row = build_property_row(&gettext("Size"));
+    let quant_row = build_property_row(&gettext("Quantization"));
+    let ctx_row = build_property_row(&gettext("Max Context"));
+    let speed_row = build_property_row(&gettext("Average Speed"));
+    let text_row = build_property_row(&gettext("Text Generation"));
+    let thinking_row = build_property_row(&gettext("Thinking"));
+    let (vision_row, vision_controls, vision_action_btn) = build_vision_detail_row();
+    let audio_row = build_property_row(&gettext("Audio"));
+
+    for row in [
+        &file_row,
+        &size_row,
+        &quant_row,
+        &ctx_row,
+        &speed_row,
+        &text_row,
+        &thinking_row,
+        &vision_row,
+        &audio_row,
+    ] {
+        details_expander.add_row(row);
+    }
+    let rows = ActiveDetailRows {
+        config_btn: config_btn.clone(),
+        details_expander,
+        file_row,
+        size_row,
+        quant_row,
+        ctx_row,
+        speed_row,
+        text_row,
+        thinking_row,
+        vision_row,
+        vision_action_btn,
+        audio_row,
+    };
+    (rows, vision_controls)
+}
+
+fn build_vision_detail_row() -> (adw::ActionRow, DownloadControls, gtk::Button) {
+    let vision_row = build_property_row(&gettext("Vision"));
+    let vision_controls = DownloadControls::new();
+    let vision_action_btn = gtk::Button::builder()
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    vision_row.add_suffix(&vision_controls.container);
+    vision_row.add_suffix(&vision_action_btn);
+    (vision_row, vision_controls, vision_action_btn)
 }
 
 pub(super) fn build_explore_group(page: &adw::PreferencesPage) -> adw::ActionRow {
@@ -161,51 +186,14 @@ pub(super) fn wire_active_group_actions(
     get_active_record: &Rc<dyn Fn() -> Option<ModelRecord>>,
     on_refresh: &Rc<dyn Fn()>,
 ) {
-    {
-        let dialog = state.dialog.clone();
-        let db = state.db.clone();
-        let active_group = active_group.clone();
-        let get_active = get_active_record.clone();
-        let on_refresh = on_refresh.clone();
-        active_rows.config_btn.connect_clicked(move |_| {
-            if let Some(m) = get_active() {
-                present_model_config_dialog(
-                    &active_group,
-                    db.clone(),
-                    m,
-                    dialog.clone(),
-                    on_refresh.clone(),
-                );
-            }
-        });
-    }
-
-    {
-        let dialog = state.dialog.clone();
-        let get_active = get_active_record.clone();
-        open_folder_btn.connect_clicked(move |_| {
-            let Some(path) = get_active().and_then(|m| m.file_path) else {
-                return;
-            };
-            let file = gio::File::for_path(&path);
-            let launcher = gtk::FileLauncher::new(Some(&file));
-            let window = dialog.root().and_downcast::<gtk::Window>();
-            let dialog_toast = dialog.clone();
-            launcher.open_containing_folder(
-                window.as_ref(),
-                None::<&gio::Cancellable>,
-                move |res| {
-                    if let Err(err) = res {
-                        dialog_toast.add_toast(adw::Toast::new(&tr_f(
-                            "Failed to open folder: {err}",
-                            &[("err", &err.to_string())],
-                        )));
-                    }
-                },
-            );
-        });
-    }
-
+    wire_config_and_folder_buttons(
+        state,
+        active_group,
+        &active_rows.config_btn,
+        open_folder_btn,
+        get_active_record,
+        on_refresh,
+    );
     let state = state.clone();
     let active_rows = active_rows.clone();
     active_model_row.connect_selected_notify(move |row| {
@@ -231,6 +219,57 @@ pub(super) fn wire_active_group_actions(
     });
 }
 
+fn wire_config_and_folder_buttons(
+    state: &ModelManagerState,
+    active_group: &adw::PreferencesGroup,
+    config_btn: &gtk::Button,
+    open_folder_btn: &gtk::Button,
+    get_active_record: &Rc<dyn Fn() -> Option<ModelRecord>>,
+    on_refresh: &Rc<dyn Fn()>,
+) {
+    let (dialog, db, rt_handle, gguf_cache, active_group, get_active, on_refresh) = (
+        state.dialog.clone(),
+        state.db.clone(),
+        state.services.rt_handle.clone(),
+        state.services.gguf_cache.clone(),
+        active_group.clone(),
+        get_active_record.clone(),
+        on_refresh.clone(),
+    );
+    config_btn.connect_clicked(move |_| {
+        if let Some(m) = get_active() {
+            present_model_config_dialog(
+                &active_group,
+                db.clone(),
+                rt_handle.clone(),
+                gguf_cache.clone(),
+                m,
+                dialog.clone(),
+                on_refresh.clone(),
+            );
+        }
+    });
+
+    let (dialog, get_active) = (state.dialog.clone(), get_active_record.clone());
+    open_folder_btn.connect_clicked(move |_| {
+        let Some(path) = get_active().and_then(|m| m.file_path) else {
+            return;
+        };
+        let dialog_toast = dialog.clone();
+        crate::ui::widgets::open_path_with_launcher(
+            &dialog,
+            std::path::Path::new(&path),
+            true,
+            move |err| {
+                dialog_toast.add_toast(adw::Toast::new(&tr_f(
+                    "Failed to open folder: {err}",
+                    &[("err", &err)],
+                )));
+            },
+        );
+    });
+}
+
 pub(super) fn apply_installed_models_snapshot(
     state: &ModelManagerState,
     installed_group: &adw::PreferencesGroup,
@@ -240,44 +279,8 @@ pub(super) fn apply_installed_models_snapshot(
     on_refresh: &Rc<dyn Fn()>,
     items: Vec<InstalledModelInfo>,
 ) {
-    let effective_active_id: Option<String>;
-    state.is_syncing_combo.set(true);
-    if items.is_empty() {
-        effective_active_id = None;
-        if state.active_id.borrow().is_some() {
-            *state.active_id.borrow_mut() = None;
-            (state.on_active_changed)(None);
-        }
-        state.cached_models.borrow_mut().clear();
-        let empty_label = gettext("No local models installed");
-        active_model_row.set_model(Some(&gtk::StringList::new(&[empty_label.as_str()])));
-        active_model_row.set_selected(0);
-        active_model_row.set_sensitive(false);
-        sync_active_model_details(None, active_rows);
-    } else {
-        let names: Vec<String> = items
-            .iter()
-            .map(|info| friendly_model_name(&info.record.display_name))
-            .collect();
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let selected_idx = state
-            .active_id
-            .borrow()
-            .as_deref()
-            .and_then(|id| items.iter().position(|x| x.record.id == id))
-            .unwrap_or(0);
-        effective_active_id = items.get(selected_idx).map(|x| x.record.id.clone());
-        if *state.active_id.borrow() != effective_active_id {
-            *state.active_id.borrow_mut() = effective_active_id.clone();
-            (state.on_active_changed)(effective_active_id.clone());
-        }
-        *state.cached_models.borrow_mut() = items.clone();
-        active_model_row.set_model(Some(&gtk::StringList::new(&name_refs)));
-        active_model_row.set_selected(selected_idx as u32);
-        active_model_row.set_sensitive(true);
-        sync_active_model_details(items.get(selected_idx), active_rows);
-    }
-    state.is_syncing_combo.set(false);
+    let effective_active_id =
+        sync_active_combo_snapshot(state, active_model_row, active_rows, &items);
 
     clear_preferences_group(installed_group);
     state.installed_badges.borrow_mut().clear();
@@ -302,6 +305,7 @@ pub(super) fn apply_installed_models_snapshot(
         dialog: state.dialog.clone(),
         on_refresh: on_refresh.clone(),
         models_dir: state.models_dir.clone(),
+        rt_handle: state.services.rt_handle.clone(),
     };
     for info in items {
         let is_active = effective_active_id.as_deref() == Some(info.record.id.as_str());
@@ -313,4 +317,53 @@ pub(super) fn apply_installed_models_snapshot(
             .push((info.record.id, badge));
         installed_group.add(&row);
     }
+}
+
+fn sync_active_combo_snapshot(
+    state: &ModelManagerState,
+    active_model_row: &adw::ComboRow,
+    active_rows: &ActiveDetailRows,
+    items: &[InstalledModelInfo],
+) -> Option<String> {
+    state.is_syncing_combo.set(true);
+    let effective_active_id = if items.is_empty() {
+        if state.active_id.borrow().is_some() {
+            *state.active_id.borrow_mut() = None;
+            (state.on_active_changed)(None);
+        }
+        state.cached_models.borrow_mut().clear();
+        active_model_row.set_model(Some(&gtk::StringList::new(&[gettext(
+            "No local models installed",
+        )
+        .as_str()])));
+        active_model_row.set_selected(0);
+        active_model_row.set_sensitive(false);
+        sync_active_model_details(None, active_rows);
+        None
+    } else {
+        let names: Vec<String> = items
+            .iter()
+            .map(|info| friendly_model_name(&info.record.display_name))
+            .collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let selected_idx = state
+            .active_id
+            .borrow()
+            .as_deref()
+            .and_then(|id| items.iter().position(|x| x.record.id == id))
+            .unwrap_or(0);
+        let active_id = items.get(selected_idx).map(|x| x.record.id.clone());
+        if *state.active_id.borrow() != active_id {
+            *state.active_id.borrow_mut() = active_id.clone();
+            (state.on_active_changed)(active_id.clone());
+        }
+        *state.cached_models.borrow_mut() = items.to_vec();
+        active_model_row.set_model(Some(&gtk::StringList::new(&name_refs)));
+        active_model_row.set_selected(selected_idx as u32);
+        active_model_row.set_sensitive(true);
+        sync_active_model_details(items.get(selected_idx), active_rows);
+        active_id
+    };
+    state.is_syncing_combo.set(false);
+    effective_active_id
 }

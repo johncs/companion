@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Arc;
 
 use serde_json::json;
 
@@ -11,15 +12,19 @@ use super::*;
 use crate::approval::ApprovalResponse;
 use crate::permissions::PermissionEngine;
 use crate::registry::ToolRegistry;
-use crate::tool::{ApprovalRequest, ToolAuthorization, ToolContext, ToolPrepareContext};
-use companion_core::types::{PermissionDecision, SearchEngine};
+use crate::tool::{
+    ApprovalRequest, ToolAuthorization, ToolContext, ToolPrepareContext, WebToolConfig,
+};
+use companion_core::types::PermissionDecision;
 
 fn is_write_already_granted(
     granted_folders: &[GrantedFolder],
     tool_name: &str,
     args: &serde_json::Value,
 ) -> bool {
-    let reg = ToolRegistry::with_builtins();
+    let reg = ToolRegistry::with_builtins(Arc::new(
+        crate::web_search::WebSearchService::new().expect("web search"),
+    ));
     let Some(tool) = reg.get(tool_name) else {
         return false;
     };
@@ -28,9 +33,7 @@ fn is_write_already_granted(
         conv_id: "test-conv",
         granted_folders,
         permissions: &perms,
-        web_search_enabled: false,
-        search_engine: SearchEngine::default(),
-        searxng_url: None,
+        web: WebToolConfig::default(),
         local_texts: &[],
     };
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -39,7 +42,7 @@ fn is_write_already_granted(
         .unwrap();
     matches!(
         rt.block_on(tool.prepare(&ctx, args)),
-        ToolAuthorization::AutoAllowed
+        ToolAuthorization::AutoAllowed(_)
     )
 }
 
@@ -48,16 +51,16 @@ fn describe_tool_action(
     tool_name: &str,
     args: &serde_json::Value,
 ) -> String {
-    let reg = ToolRegistry::with_builtins();
+    let reg = ToolRegistry::with_builtins(Arc::new(
+        crate::web_search::WebSearchService::new().expect("web search"),
+    ));
     let tool = reg.get(tool_name).unwrap();
     let perms = PermissionEngine::new();
     let ctx = ToolPrepareContext {
         conv_id: "test-conv",
         granted_folders,
         permissions: &perms,
-        web_search_enabled: false,
-        search_engine: SearchEngine::default(),
-        searxng_url: None,
+        web: WebToolConfig::default(),
         local_texts: &[],
     };
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -78,22 +81,37 @@ fn execute_tool_with_grants(
     tool_name: &str,
     args: &serde_json::Value,
 ) -> anyhow::Result<String> {
-    let reg = ToolRegistry::with_builtins();
+    let reg = ToolRegistry::with_builtins(Arc::new(
+        crate::web_search::WebSearchService::new().expect("web search"),
+    ));
     let tool = reg
         .get(tool_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown tool: {tool_name}"))?;
+    let perms = PermissionEngine::new();
+    let prep_ctx = ToolPrepareContext {
+        conv_id: "test-conv",
+        granted_folders,
+        permissions: &perms,
+        web: WebToolConfig::default(),
+        local_texts: &[],
+    };
     let ctx = ToolContext {
         granted_folders,
-        web_search_enabled: false,
-        search_engine: SearchEngine::default(),
-        searxng_url: None,
+        web: WebToolConfig::default(),
     };
     let approval = ApprovalResponse::Tool(PermissionDecision::AllowOnce);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    rt.block_on(tool.execute_approved(&ctx, args, &approval))
+    rt.block_on(async {
+        let prepared = match tool.prepare(&prep_ctx, args).await {
+            ToolAuthorization::AutoAllowed(p)
+            | ToolAuthorization::RequiresApproval { prepared: p, .. } => p,
+            ToolAuthorization::Rejected { reason, .. } => anyhow::bail!("{reason}"),
+        };
+        tool.execute_approved(&ctx, prepared, &approval).await
+    })
 }
 
 fn requested_ungranted_path(
@@ -101,16 +119,16 @@ fn requested_ungranted_path(
     tool_name: &str,
     args: &serde_json::Value,
 ) -> Option<std::path::PathBuf> {
-    let reg = ToolRegistry::with_builtins();
+    let reg = ToolRegistry::with_builtins(Arc::new(
+        crate::web_search::WebSearchService::new().expect("web search"),
+    ));
     let tool = reg.get(tool_name)?;
     let perms = PermissionEngine::new();
     let ctx = ToolPrepareContext {
         conv_id: "test-conv",
         granted_folders,
         permissions: &perms,
-        web_search_enabled: false,
-        search_engine: SearchEngine::default(),
-        searxng_url: None,
+        web: WebToolConfig::default(),
         local_texts: &[],
     };
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -318,6 +336,9 @@ fn requested_ungranted_path_detects_outside_files_and_folders() {
     );
     assert_eq!(covered, None);
 
+    assert!(describe_tool_action(&[], "delete_file", &json!({})).contains("Rejected"));
+    assert!(describe_tool_action(&[], "write_file", &json!({"path": " "})).contains("Rejected"));
+
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -357,6 +378,9 @@ fn argument_aliases_are_consistent_across_describe_ungranted_and_execute() {
         assert!(describe_tool_action(&[], "create_directory", &dir_args).contains("new_dir"));
         assert!(describe_tool_action(&[], "delete_directory", &dir_args).contains("new_dir"));
     }
+
+    assert!(describe_tool_action(&[], "delete_file", &json!({})).contains("Rejected"));
+    assert!(describe_tool_action(&[], "write_file", &json!({"path": " "})).contains("Rejected"));
 
     let _ = fs::remove_dir_all(&dir);
 }

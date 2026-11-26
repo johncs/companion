@@ -7,15 +7,15 @@ mod starter_models;
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::core::runtime;
 use crate::i18n::gettext;
 use crate::models::download_manager::DownloadManager;
 use crate::models::hardware::HardwareInfo;
-use crate::models::huggingface::search_gguf_repos;
+use crate::services::AppServices;
 use crate::storage::Database;
 use crate::ui::widgets::clear_preferences_group;
 
@@ -29,6 +29,7 @@ pub use starter_models::build_starter_model_group;
 #[derive(Clone)]
 pub struct HfBrowserContext {
     pub dialog: adw::PreferencesDialog,
+    pub services: Arc<AppServices>,
     pub db: Database,
     pub hw: HardwareInfo,
     pub download_manager: DownloadManager,
@@ -40,6 +41,7 @@ impl HfBrowserContext {
     pub(super) fn with_refresh(&self, refresh_installed: Rc<dyn Fn()>) -> Self {
         Self {
             dialog: self.dialog.clone(),
+            services: self.services.clone(),
             db: self.db.clone(),
             hw: self.hw.clone(),
             download_manager: self.download_manager.clone(),
@@ -61,15 +63,39 @@ pub fn build_explore_subpage_with_query(
 ) -> adw::NavigationPage {
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&adw::HeaderBar::new());
+    let (discover_group, search_entry, search_btn) = build_discover_search_group();
+    let results_group = adw::PreferencesGroup::new();
+    let run_hf_search = build_search_runner(results_group.clone(), ctx.clone());
 
     let page = adw::PreferencesPage::new();
+    page.add(&discover_group);
+    page.add(&results_group);
+    toolbar_view.set_content(Some(&page));
+
+    let (run1, entry1) = (run_hf_search.clone(), search_entry.clone());
+    search_btn.connect_clicked(move |_| run1(entry1.text().to_string()));
+    let run2 = run_hf_search.clone();
+    search_entry.connect_activate(move |entry| run2(entry.text().to_string()));
+
+    let init_q = initial_query.unwrap_or("").trim().to_string();
+    if !init_q.is_empty() {
+        search_entry.set_text(&init_q);
+    }
+    run_hf_search(init_q);
+    adw::NavigationPage::builder()
+        .title(gettext("Explore AI Models"))
+        .tag("explore-models")
+        .child(&toolbar_view)
+        .build()
+}
+
+fn build_discover_search_group() -> (adw::PreferencesGroup, gtk::SearchEntry, gtk::Button) {
     let discover_group = adw::PreferencesGroup::builder()
         .title(gettext("Discover on Hugging Face"))
         .description(gettext(
             "Search and download AI models directly into Companion.",
         ))
         .build();
-
     let search_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
@@ -85,35 +111,7 @@ pub fn build_explore_subpage_with_query(
     search_row.append(&search_entry);
     search_row.append(&search_btn);
     discover_group.add(&search_row);
-
-    let results_group = adw::PreferencesGroup::new();
-    let run_hf_search = build_search_runner(results_group.clone(), ctx.clone());
-
-    page.add(&discover_group);
-    page.add(&results_group);
-    toolbar_view.set_content(Some(&page));
-
-    {
-        let run = run_hf_search.clone();
-        let entry = search_entry.clone();
-        search_btn.connect_clicked(move |_| run(entry.text().to_string()));
-    }
-    {
-        let run = run_hf_search.clone();
-        search_entry.connect_activate(move |entry| run(entry.text().to_string()));
-    }
-
-    let init_q = initial_query.unwrap_or("").trim().to_string();
-    if !init_q.is_empty() {
-        search_entry.set_text(&init_q);
-    }
-    run_hf_search(init_q);
-
-    adw::NavigationPage::builder()
-        .title(gettext("Explore AI Models"))
-        .tag("explore-models")
-        .child(&toolbar_view)
-        .build()
+    (discover_group, search_entry, search_btn)
 }
 
 fn build_search_runner(
@@ -148,8 +146,9 @@ impl SearchRunner {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let query_for_task = query.clone();
-        runtime().spawn(async move {
-            let _ = tx.send(search_gguf_repos(&query_for_task, 12).await);
+        let hf_client = self.ctx.services.hf_client.clone();
+        self.ctx.services.rt_handle.spawn(async move {
+            let _ = tx.send(hf_client.search_gguf_repos(&query_for_task, 12).await);
         });
 
         let runner = Rc::clone(self);
@@ -187,7 +186,7 @@ impl SearchRunner {
 fn build_search_error_row(err_msg: &str, query: &str, runner: &Rc<SearchRunner>) -> adw::ActionRow {
     let error_row = adw::ActionRow::builder()
         .title(gettext("Could not reach Hugging Face"))
-        .subtitle(crate::core::markdown::escape_pango_markup(err_msg))
+        .subtitle(crate::format::markdown::escape_pango_markup(err_msg))
         .build();
     error_row.add_prefix(&gtk::Image::from_icon_name("network-offline-symbolic"));
     let retry_btn = gtk::Button::builder()

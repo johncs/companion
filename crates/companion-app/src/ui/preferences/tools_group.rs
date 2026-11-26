@@ -1,93 +1,17 @@
 //! Built-in agent tools capability matrix inside Agent & MCP preferences.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 
+use crate::agent::registry::ToolRegistry;
+use crate::agent::tool::{ToolMetadata, ToolRisk};
+use crate::agent::web_search::WebSearchService;
 use crate::i18n::gettext;
 
-struct ToolDisplaySpec {
-    name: &'static str,
-    desc: &'static str,
-    read_policy: &'static str,
-    rw_policy: &'static str,
-    is_web: bool,
-}
-
-const TOOL_SPECS: &[ToolDisplaySpec] = &[
-    ToolDisplaySpec {
-        name: "list_files",
-        desc: "List files and folders inside a granted directory (respecting .gitignore).",
-        read_policy: "Allow",
-        rw_policy: "Allow",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "read_file",
-        desc: "Read UTF-8 text files up to 100 KB (prompts if the path is not granted yet).",
-        read_policy: "Allow",
-        rw_policy: "Allow",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "search_files",
-        desc: "Search for matching text lines across granted files and folders.",
-        read_policy: "Allow",
-        rw_policy: "Allow",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "write_file",
-        desc: "Create or overwrite files inside a granted directory.",
-        read_policy: "Ask",
-        rw_policy: "Allow",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "create_directory",
-        desc: "Create subdirectories inside a granted directory.",
-        read_policy: "Ask",
-        rw_policy: "Allow",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "move_path",
-        desc: "Move or rename files and folders within a granted directory.",
-        read_policy: "Ask",
-        rw_policy: "Allow",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "delete_file",
-        desc: "Delete a single file inside a granted directory.",
-        read_policy: "Ask",
-        rw_policy: "Ask",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "delete_directory",
-        desc: "Delete a subdirectory inside a granted directory.",
-        read_policy: "Ask",
-        rw_policy: "Ask",
-        is_web: false,
-    },
-    ToolDisplaySpec {
-        name: "web_search",
-        desc: "Search the web via DuckDuckGo or SearXNG when Web Search is enabled.",
-        read_policy: "Ask",
-        rw_policy: "Ask",
-        is_web: true,
-    },
-    ToolDisplaySpec {
-        name: "fetch_url",
-        desc: "Read plain text from an approved HTTPS web page when Web Search is enabled.",
-        read_policy: "Ask",
-        rw_policy: "Ask",
-        is_web: true,
-    },
-];
-
 pub(super) fn build_available_tools_group(
+    web_search: Arc<WebSearchService>,
     web_search_enabled: bool,
 ) -> (adw::PreferencesGroup, Rc<dyn Fn(bool)>) {
     let group = adw::PreferencesGroup::builder()
@@ -107,10 +31,13 @@ pub(super) fn build_available_tools_group(
     header_row.add_suffix(&header_cols);
     group.add(&header_row);
 
+    let registry = ToolRegistry::with_builtins(web_search);
     let mut web_labels: Vec<gtk::Label> = Vec::new();
-    for spec in TOOL_SPECS {
-        let (row, r_lbl, rw_lbl) = build_tool_row(spec, web_search_enabled);
-        if spec.is_web {
+    for tool in registry.iter() {
+        let meta = tool.metadata();
+        let is_web = tool.risk() == ToolRisk::Network;
+        let (row, r_lbl, rw_lbl) = build_tool_row(&meta, is_web, web_search_enabled);
+        if is_web {
             web_labels.push(r_lbl);
             web_labels.push(rw_lbl);
         }
@@ -132,16 +59,19 @@ pub(super) fn build_available_tools_group(
 }
 
 fn build_tool_row(
-    spec: &ToolDisplaySpec,
+    meta: &ToolMetadata,
+    is_web: bool,
     web_search_enabled: bool,
 ) -> (adw::ActionRow, gtk::Label, gtk::Label) {
-    let friendly = crate::ui::permission_dialog::friendly_tool_name(spec.name);
-    let desc = gettext(spec.desc);
     let row = adw::ActionRow::builder()
-        .title(crate::core::markdown::escape_pango_markup(&friendly))
-        .subtitle(crate::core::markdown::escape_pango_markup(&desc))
+        .title(crate::format::markdown::escape_pango_markup(
+            &meta.display_name,
+        ))
+        .subtitle(crate::format::markdown::escape_pango_markup(
+            &meta.description,
+        ))
         .build();
-    let (read_col, rw_col) = if spec.is_web {
+    let (read_col, rw_col) = if is_web {
         let status = if web_search_enabled {
             gettext("Ask")
         } else {
@@ -149,7 +79,7 @@ fn build_tool_row(
         };
         (status.clone(), status)
     } else {
-        (gettext(spec.read_policy), gettext(spec.rw_policy))
+        (gettext(meta.read_policy), gettext(meta.rw_policy))
     };
     let (cols, r_lbl, rw_lbl) = build_columns(&read_col, &rw_col, false);
     row.add_suffix(&cols);

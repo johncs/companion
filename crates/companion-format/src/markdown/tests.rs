@@ -95,8 +95,10 @@ fn parses_tables_quotes_rules_and_task_lists() {
 fn reuses_prepopulated_code_highlight_cache() {
     let mut cache = CodeHighlightCache::new();
     cache.insert(
-        (Some("rust".to_string()), "let x = 1;".to_string()),
-        ("cached-light".to_string(), "cached-dark".to_string()),
+        Some("rust"),
+        "let x = 1;",
+        "cached-light".to_string(),
+        "cached-dark".to_string(),
     );
     let blocks = parse_markdown_blocks_cached("```rust\nlet x = 1;\n```", &mut cache);
     assert_eq!(blocks.len(), 1);
@@ -129,6 +131,17 @@ fn closes_unclosed_inline_tags_and_handles_tilde_fences() {
             ..
         } if lang == "sh" && code == "echo hi"
     ));
+}
+
+#[test]
+fn flushes_blockquote_before_code_and_handles_streaming_opening_fence() {
+    let blocks = parse_markdown_blocks("> Quoted line\n\n```rust\nlet a = 1;\n```");
+    assert!(matches!(&blocks[0], MarkdownBlock::Quote(q) if q.contains("Quoted line")));
+    assert!(matches!(&blocks[1], MarkdownBlock::Code { .. }));
+
+    let mut cache = CodeHighlightCache::new();
+    let streaming = parse_markdown_blocks_streaming("```", &mut cache);
+    assert!(streaming.is_empty() || matches!(&streaming[0], MarkdownBlock::Code { .. }));
 }
 
 #[test]

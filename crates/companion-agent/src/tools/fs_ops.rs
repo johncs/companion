@@ -2,11 +2,12 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::path_guard::resolve_granted_path;
+use super::path_guard::{resolve_granted_leaf, resolve_granted_path};
 
 pub(super) const MAX_LIST_ENTRIES: usize = 200;
 const MAX_SEARCH_HITS: usize = 50;
@@ -41,20 +42,59 @@ pub fn list_granted_files(
     Ok(out)
 }
 
-/// Read a UTF-8 file inside `granted_root` (capped at 100 KB).
+/// Read a UTF-8 file inside `granted_root` (capped at 100 KB without loading oversized files into RAM).
 pub fn read_granted_file(granted_root: &Path, rel_path: &str) -> Result<String> {
     let target = resolve_granted_path(granted_root, rel_path)?;
-    let bytes = fs::read(&target).with_context(|| format!("Failed to read {rel_path}"))?;
+    let (bytes, truncated) = read_bounded_bytes(&target, MAX_READ_BYTES)
+        .with_context(|| format!("Failed to read {rel_path}"))?;
     if bytes.iter().take(4096).any(|&b| b == 0) {
         bail!("'{rel_path}' appears to be a binary file");
     }
-    if bytes.len() > MAX_READ_BYTES {
-        let mut s = String::from_utf8_lossy(&bytes[..MAX_READ_BYTES]).to_string();
+    if truncated {
+        let valid = utf8_truncate_prefix(&bytes, MAX_READ_BYTES);
+        let mut s = String::from_utf8_lossy(valid).to_string();
         s.push_str("\n\n[…truncated at 100 KB…]");
         Ok(s)
     } else {
         Ok(String::from_utf8_lossy(&bytes).to_string())
     }
+}
+
+fn read_bounded_bytes(path: &Path, max_bytes: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let file = fs::File::open(path)?;
+    let mut buf = Vec::new();
+    file.take((max_bytes + 1) as u64).read_to_end(&mut buf)?;
+    let truncated = buf.len() > max_bytes;
+    if truncated {
+        buf.truncate(max_bytes);
+    }
+    Ok((buf, truncated))
+}
+
+fn utf8_truncate_prefix(bytes: &[u8], limit: usize) -> &[u8] {
+    let end = bytes.len().min(limit);
+    let mut i = end;
+    while i > 0 && end - i < 4 && (bytes[i - 1] & 0xC0) == 0x80 {
+        i -= 1;
+    }
+    if i > 0 && end - i < 4 {
+        let lead = bytes[i - 1];
+        let expected_len = if lead & 0x80 == 0 {
+            1
+        } else if lead & 0xE0 == 0xC0 {
+            2
+        } else if lead & 0xF0 == 0xE0 {
+            3
+        } else if lead & 0xF8 == 0xF0 {
+            4
+        } else {
+            1
+        };
+        if end - (i - 1) < expected_len {
+            return &bytes[..i - 1];
+        }
+    }
+    &bytes[..end]
 }
 
 /// Search for `query` across text files in `granted_root`.
@@ -74,10 +114,10 @@ pub fn search_granted_files(granted_root: &Path, query: &str) -> Result<Vec<Stri
         let Ok(target) = resolve_granted_path(granted_root, &rel) else {
             continue;
         };
-        let Ok(bytes) = fs::read(&target) else {
+        let Ok((bytes, truncated)) = read_bounded_bytes(&target, MAX_READ_BYTES) else {
             continue;
         };
-        if bytes.len() > MAX_READ_BYTES || bytes.iter().take(2048).any(|&b| b == 0) {
+        if truncated || bytes.iter().take(2048).any(|&b| b == 0) {
             continue;
         }
         let text = String::from_utf8_lossy(&bytes);
@@ -105,13 +145,12 @@ pub fn write_granted_file(granted_root: &Path, rel_path: &str, content: &str) ->
     Ok(format!("Wrote {} bytes to {rel_path}", content.len()))
 }
 
-/// Delete a single file inside `granted_root` (directories are not deleted).
+/// Delete a single file (or symlink) inside `granted_root` (directories are not deleted).
 pub fn delete_granted_file(granted_root: &Path, rel_path: &str) -> Result<String> {
-    let target = resolve_granted_path(granted_root, rel_path)?;
-    if !target.exists() {
-        bail!("File does not exist: {rel_path}");
-    }
-    if target.is_dir() {
+    let target = resolve_granted_leaf(granted_root, rel_path)?;
+    let meta = fs::symlink_metadata(&target)
+        .with_context(|| format!("File does not exist: {rel_path}"))?;
+    if meta.is_dir() {
         bail!("Cannot delete a directory with delete_file: {rel_path}");
     }
     fs::remove_file(&target).with_context(|| format!("Failed to delete {rel_path}"))?;
@@ -147,17 +186,19 @@ pub fn move_granted_path(granted_root: &Path, from_rel: &str, to_rel: &str) -> R
     Ok(format!("Moved {from_rel} to {to_rel}"))
 }
 
-/// Recursively delete a subdirectory inside `granted_root` (refuses to delete `granted_root` itself).
+/// Recursively delete a subdirectory inside `granted_root` (refuses to delete `granted_root` itself or symlinks).
 pub fn delete_granted_directory(granted_root: &Path, rel_path: &str) -> Result<String> {
     let root_canon = fs::canonicalize(granted_root)?;
-    let target = resolve_granted_path(granted_root, rel_path)?;
-    if !target.exists() {
-        bail!("Directory does not exist: {rel_path}");
+    let target = resolve_granted_leaf(granted_root, rel_path)?;
+    let meta = fs::symlink_metadata(&target)
+        .with_context(|| format!("Directory does not exist: {rel_path}"))?;
+    if meta.file_type().is_symlink() {
+        bail!("Cannot delete a symlink with delete_directory: {rel_path}");
     }
-    if !target.is_dir() {
+    if !meta.is_dir() {
         bail!("Path is not a directory: {rel_path}");
     }
-    if target == root_canon {
+    if fs::canonicalize(&target).ok().as_ref() == Some(&root_canon) {
         bail!("Cannot delete the granted root directory itself");
     }
     fs::remove_dir_all(&target)
@@ -202,9 +243,17 @@ fn collect_files(
         if SKIP_DIRS.contains(&name) || ignored.contains(name) {
             continue;
         }
-        if path.is_dir() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             collect_files(root_canon, &path, ignored, max_entries, out);
-        } else if let Ok(rel) = path.strip_prefix(root_canon) {
+        } else if ft.is_file()
+            && let Ok(rel) = path.strip_prefix(root_canon)
+        {
             out.push(rel.to_string_lossy().to_string());
         }
     }

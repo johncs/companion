@@ -1,5 +1,6 @@
 //! Injectable, GTK-free resumable model & vision-projector download manager.
 
+mod restore;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -14,8 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use tokio::sync::broadcast;
 
-use crate::huggingface::{HfClient, part_file_path, remove_part_file};
+use crate::huggingface::{HfClient, remove_part_file};
 use companion_storage::{Database, PendingDownload};
+
+pub use state::DownloadError;
 
 use state::{ActiveDownloadEntry, ActiveDownloadsMap};
 use worker::{CompletionInfo, FetchJob, handle_fetch_completion, run_fetch_job};
@@ -44,6 +47,12 @@ pub trait ModelFetcher: Send + Sync {
 #[derive(Default)]
 pub struct HfModelFetcher {
     client: HfClient,
+}
+
+impl HfModelFetcher {
+    pub fn with_client(client: HfClient) -> Self {
+        Self { client }
+    }
 }
 
 impl ModelFetcher for HfModelFetcher {
@@ -151,20 +160,14 @@ impl DownloadManager {
         });
 
         if is_new {
-            if req.attach_to_model_id.is_none() {
-                let db_pend = self.inner.db.clone();
-                let pend = PendingDownload {
-                    repo_id: req.repo_id,
-                    filename: req.filename,
-                    mmproj_filename: req.mmproj_filename,
-                    display_name: req.display_name,
-                    total_bytes: None,
-                };
-                self.inner.handle.spawn_blocking(move || {
-                    let _ = db_pend.upsert_pending_download(pend);
-                });
-            }
-            self.launch_entry_task(&key);
+            let pending = req.attach_to_model_id.is_none().then_some(PendingDownload {
+                repo_id: req.repo_id,
+                filename: req.filename,
+                mmproj_filename: req.mmproj_filename,
+                display_name: req.display_name,
+                total_bytes: None,
+            });
+            self.launch_entry_task(&key, pending);
         }
 
         DownloadHandle {
@@ -177,9 +180,11 @@ impl DownloadManager {
 
     pub fn pause(&self, key: &DownloadKey) {
         self.inner.active.with_entry(key, |entry| {
-            entry.status = DownloadStatus::Paused;
-            entry.stop_flag.store(true, Ordering::Relaxed);
-            entry.emit();
+            if entry.status == DownloadStatus::Active {
+                entry.status = DownloadStatus::Paused;
+                entry.stop_flag.store(true, Ordering::Relaxed);
+                entry.emit();
+            }
         });
     }
 
@@ -192,12 +197,12 @@ impl DownloadManager {
             return false;
         };
         if was_paused {
-            self.launch_entry_task(key);
+            self.launch_entry_task(key, None);
         }
         true
     }
 
-    pub fn cancel(&self, key: &DownloadKey) -> Result<()> {
+    pub fn cancel(&self, key: &DownloadKey) {
         let Some((was_paused, repo_id, filename, mmproj_name)) =
             self.inner.active.with_entry(key, |entry| {
                 let was_paused = entry.status == DownloadStatus::Paused;
@@ -211,15 +216,17 @@ impl DownloadManager {
                 )
             })
         else {
-            return Ok(());
+            return;
         };
 
         if was_paused && let Some(mut entry) = self.inner.active.remove(key) {
             entry.status = DownloadStatus::Cancelled;
             entry.emit();
             let repo_dir = self.repo_dir(&repo_id);
-            let dpath = repo_dir.join(&filename);
-            let mpath = mmproj_name.as_deref().map(|m| repo_dir.join(m));
+            let dpath = join_safe_filename(&repo_dir, &filename);
+            let mpath = mmproj_name
+                .as_deref()
+                .map(|m| join_safe_filename(&repo_dir, m));
             let db_c = self.inner.db.clone();
             self.inner.handle.spawn(async move {
                 remove_part_file(&dpath).await;
@@ -232,69 +239,6 @@ impl DownloadManager {
                 .await;
             });
         }
-        Ok(())
-    }
-
-    pub fn restore_pending(&self) -> Vec<DownloadHandle> {
-        let pending = self.inner.db.list_pending_downloads().unwrap_or_default();
-        let mut handles = Vec::new();
-        for item in pending {
-            if let Some(handle) = self.try_restore_item(item) {
-                handles.push(handle);
-            }
-        }
-        handles
-    }
-
-    fn try_restore_item(&self, item: PendingDownload) -> Option<DownloadHandle> {
-        let key = (item.repo_id.clone(), item.filename.clone());
-        let repo_dir = self.repo_dir(&item.repo_id);
-        let main_done = repo_dir.join(&item.filename);
-        let main_part = part_file_path(&main_done);
-        let mm_done = item.mmproj_filename.as_deref().map(|m| repo_dir.join(m));
-        let mm_part = mm_done.as_deref().map(part_file_path);
-
-        if !main_part.exists() && !mm_part.as_ref().is_some_and(|p| p.exists()) {
-            let _ = self
-                .inner
-                .db
-                .remove_pending_download(&item.repo_id, &item.filename);
-            return None;
-        }
-        let existing = existing_bytes(&main_part, &main_done)
-            + mm_part
-                .as_deref()
-                .zip(mm_done.as_deref())
-                .map(|(p, d)| existing_bytes(p, d))
-                .unwrap_or(0);
-
-        let display_name = item.display_name.clone();
-        self.inner.active.with_map(|map| {
-            if map.contains_key(&key) {
-                return None;
-            }
-            let entry = ActiveDownloadEntry::new(
-                DownloadRequest {
-                    repo_id: item.repo_id,
-                    filename: item.filename,
-                    mmproj_filename: item.mmproj_filename,
-                    display_name: display_name.clone(),
-                    attach_to_model_id: None,
-                },
-                existing,
-                item.total_bytes,
-                DownloadStatus::Paused,
-            );
-            let initial = entry.snapshot();
-            let rx = entry.tx.subscribe();
-            map.insert(key.clone(), entry);
-            Some(DownloadHandle {
-                key,
-                display_name,
-                initial,
-                rx,
-            })
-        })
     }
 
     pub fn subscribe(&self, key: &DownloadKey) -> Option<broadcast::Receiver<DownloadSnapshot>> {
@@ -309,51 +253,98 @@ impl DownloadManager {
         self.inner.active.summaries()
     }
 
-    fn repo_dir(&self, repo_id: &str) -> PathBuf {
-        self.inner.models_dir.join(repo_id.replace('/', "--"))
+    pub(super) fn repo_dir(&self, repo_id: &str) -> PathBuf {
+        let safe_repo: String = repo_id
+            .split('/')
+            .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+            .collect::<Vec<_>>()
+            .join("--");
+        let leaf = if safe_repo.is_empty() {
+            "unknown-repo"
+        } else {
+            safe_repo.as_str()
+        };
+        self.inner.models_dir.join(leaf)
     }
 
-    fn launch_entry_task(&self, key: &DownloadKey) {
-        let Some((repo_id, filename, mmproj_name, display_name, attach_id, stop_flag, attempt_id)) =
-            self.inner.active.with_entry(key, |entry| {
-                let flag = Arc::new(AtomicBool::new(false));
-                entry.stop_flag = flag.clone();
-                entry.attempt_id = entry.attempt_id.wrapping_add(1);
-                entry.status = DownloadStatus::Active;
-                entry.emit();
-                (
-                    entry.repo_id.clone(),
-                    entry.filename.clone(),
-                    entry.mmproj_filename.clone(),
-                    entry.display_name.clone(),
-                    entry.attach_to_model_id.clone(),
-                    flag,
-                    entry.attempt_id,
-                )
-            })
+    fn launch_entry_task(&self, key: &DownloadKey, initial_pending: Option<PendingDownload>) {
+        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+        let Some((
+            repo_id,
+            filename,
+            mmproj_name,
+            display_name,
+            attach_id,
+            stop_flag,
+            attempt_id,
+            prev_worker_done,
+        )) = self.inner.active.with_entry(key, |entry| {
+            let flag = Arc::new(AtomicBool::new(false));
+            let prev_done = entry.worker_done.replace(done_rx);
+            entry.stop_flag = flag.clone();
+            entry.attempt_id = entry.attempt_id.wrapping_add(1);
+            entry.status = DownloadStatus::Active;
+            entry.emit();
+            (
+                entry.repo_id.clone(),
+                entry.filename.clone(),
+                entry.mmproj_filename.clone(),
+                entry.display_name.clone(),
+                entry.attach_to_model_id.clone(),
+                flag,
+                entry.attempt_id,
+                prev_done,
+            )
+        })
         else {
             return;
         };
 
         let repo_dir = self.repo_dir(&repo_id);
-        let dest_path = repo_dir.join(&filename);
-        let mmproj_dest = mmproj_name.as_deref().map(|m| repo_dir.join(m));
+        let dest_path = join_safe_filename(&repo_dir, &filename);
+        let mmproj_dest = mmproj_name
+            .as_deref()
+            .map(|m| join_safe_filename(&repo_dir, m));
         let inner = self.inner.clone();
         let key_owned = (repo_id, filename);
 
         self.inner.handle.spawn(async move {
-            let res = run_fetch_job(
-                &inner,
-                FetchJob {
-                    key: &key_owned,
-                    dest_path: &dest_path,
-                    mmproj_name: mmproj_name.as_deref(),
-                    mmproj_dest: mmproj_dest.as_deref(),
-                    persist_total: attach_id.is_none(),
-                    stop_flag,
-                },
-            )
-            .await;
+            if let Some(mut prev_done) = prev_worker_done {
+                let _ = prev_done.wait_for(|&done| done).await;
+            }
+            if let Some(pend) = initial_pending {
+                let db_pend = inner.db.clone();
+                match tokio::task::spawn_blocking(move || db_pend.upsert_pending_download(pend))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => tracing::warn!("Failed to persist pending download: {err}"),
+                    Err(err) => tracing::warn!("Pending download DB task failed: {err}"),
+                }
+            }
+            let cancelled_before_start = inner
+                .active
+                .with_entry(&key_owned, |e| {
+                    e.attempt_id != attempt_id || e.status != DownloadStatus::Active
+                })
+                .unwrap_or(true);
+            let res = if cancelled_before_start {
+                Err(anyhow::anyhow!("Download paused or cancelled"))
+            } else {
+                run_fetch_job(
+                    &inner,
+                    FetchJob {
+                        key: &key_owned,
+                        attempt_id,
+                        dest_path: &dest_path,
+                        mmproj_name: mmproj_name.as_deref(),
+                        mmproj_dest: mmproj_dest.as_deref(),
+                        persist_total: attach_id.is_none(),
+                        stop_flag,
+                    },
+                )
+                .await
+            };
 
             handle_fetch_completion(
                 &inner,
@@ -368,13 +359,20 @@ impl DownloadManager {
                 res,
             )
             .await;
+            let _ = done_tx.send(true);
         });
     }
 }
 
-fn existing_bytes(part: &Path, done: &Path) -> u64 {
-    std::fs::metadata(part)
-        .or_else(|_| std::fs::metadata(done))
-        .map(|m| m.len())
-        .unwrap_or(0)
+pub(super) fn join_safe_filename(dir: &Path, raw: &str) -> PathBuf {
+    let mut out = dir.to_path_buf();
+    for comp in Path::new(raw).components() {
+        if let std::path::Component::Normal(seg) = comp {
+            out.push(seg);
+        }
+    }
+    if out == dir {
+        out.push("model.gguf");
+    }
+    out
 }

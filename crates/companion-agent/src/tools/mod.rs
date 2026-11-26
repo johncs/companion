@@ -17,3 +17,13 @@ pub use path_guard::{GrantedFolder, find_covering_granted_folder};
 pub use read_tools::{ListFilesTool, ReadFileTool, SearchFilesTool};
 pub use web_tools::{FetchUrlTool, WebSearchTool};
 pub use write_tools::{CreateDirectoryTool, MovePathTool, WriteFileTool};
+
+/// Run a synchronous filesystem tool closure on Tokio's blocking pool.
+pub(super) async fn run_blocking_tool<F>(f: F) -> anyhow::Result<String>
+where
+    F: FnOnce() -> anyhow::Result<String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow::anyhow!("Tool task failed: {e}"))?
+}

@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
 use companion_core::AssistantPersonality;
-use companion_core::types::SearchEngine;
+use companion_core::types::{DEFAULT_ASSISTANT_NAME, SearchEngine};
 
 use super::Database;
 
@@ -70,36 +70,7 @@ impl Database {
                 let (k, v) = row?;
                 map.insert(k, v);
             }
-
-            let assistant_name = map
-                .get("assistant_name")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "Companion".to_string());
-            let user_name = map
-                .get("user_name")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let personality = map
-                .get("assistant_personality")
-                .map(|s| AssistantPersonality::from_str_lossy(s))
-                .unwrap_or_default();
-            let custom_personality = map
-                .get("assistant_custom_personality")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let user_about = map
-                .get("user_about")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            Ok(PersonalizationSettings {
-                assistant_name,
-                user_name,
-                personality,
-                custom_personality,
-                user_about,
-            })
+            Ok(parse_personalization_map(&map))
         })
     }
 
@@ -110,18 +81,39 @@ impl Database {
     pub fn set_active_model_id(&self, model_id: Option<&str>) -> Result<()> {
         self.set_setting("active_model_id", model_id)
     }
+}
 
+fn parse_personalization_map(map: &HashMap<String, String>) -> PersonalizationSettings {
+    let trim_opt = |key: &str| {
+        map.get(key)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    PersonalizationSettings {
+        assistant_name: trim_opt("assistant_name")
+            .unwrap_or_else(|| DEFAULT_ASSISTANT_NAME.to_string()),
+        user_name: trim_opt("user_name"),
+        personality: map
+            .get("assistant_personality")
+            .map(|s| AssistantPersonality::from_str_lossy(s))
+            .unwrap_or_default(),
+        custom_personality: trim_opt("assistant_custom_personality"),
+        user_about: trim_opt("user_about"),
+    }
+}
+
+impl Database {
     pub fn get_assistant_name(&self) -> Result<String> {
         Ok(self
             .get_setting("assistant_name")?
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "Companion".to_string()))
+            .unwrap_or_else(|| DEFAULT_ASSISTANT_NAME.to_string()))
     }
 
     pub fn set_assistant_name(&self, name: &str) -> Result<()> {
         let trimmed = name.trim();
-        let val = (!trimmed.is_empty() && trimmed != "Companion").then_some(trimmed);
+        let val = (!trimmed.is_empty() && trimmed != DEFAULT_ASSISTANT_NAME).then_some(trimmed);
         self.set_setting("assistant_name", val)
     }
 

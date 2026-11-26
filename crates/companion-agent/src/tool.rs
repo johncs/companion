@@ -1,5 +1,8 @@
-//! Core tool abstractions (`Tool`, `ToolRisk`, `ToolContext`, `ToolAuthorization`).
+//! Core tool abstractions (`Tool`, `ToolRisk`, `ToolMetadata`, `PreparedToolCall`).
 
+use std::any::Any;
+use std::borrow::Cow;
+use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -16,6 +19,24 @@ use companion_core::types::{SearchEngine, ToolCallStatus};
 /// Boxed future returned by async [`Tool`] methods.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Type-erased, single-pass validated argument payload passed from [`Tool::prepare`] to [`Tool::execute_approved`].
+pub struct PreparedToolCall(Box<dyn Any + Send + Sync>);
+
+impl PreparedToolCall {
+    /// Wrap a validated tool-specific argument struct.
+    pub fn new<T: Send + Sync + 'static>(val: T) -> Self {
+        Self(Box::new(val))
+    }
+
+    /// Recover the concrete argument struct produced by [`Tool::prepare`].
+    pub fn downcast<T: 'static>(self) -> Result<T> {
+        self.0
+            .downcast::<T>()
+            .map(|b| *b)
+            .map_err(|_| anyhow::anyhow!("Internal tool state mismatch"))
+    }
+}
+
 /// Risk classification controlling permission prompts and session auto-allow rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolRisk {
@@ -29,31 +50,45 @@ pub enum ToolRisk {
     Network,
 }
 
+/// Declarative metadata exposed by each [`Tool`] for prompt generation and UI capability tables.
+#[derive(Debug, Clone)]
+pub struct ToolMetadata {
+    pub display_name: String,
+    pub description: String,
+    pub prompt_summary: &'static str,
+    pub parameter_example: &'static str,
+    pub read_policy: &'static str,
+    pub rw_policy: &'static str,
+}
+
+/// Web search / fetch runtime configuration passed to tools.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebToolConfig<'a> {
+    pub enabled: bool,
+    pub engine: SearchEngine,
+    pub searxng_url: Option<&'a str>,
+}
+
 /// Pre-flight context supplied to [`Tool::prepare`] before prompting the user.
 pub struct ToolPrepareContext<'a> {
     pub conv_id: &'a str,
     pub granted_folders: &'a [GrantedFolder],
     pub permissions: &'a PermissionEngine,
-    pub web_search_enabled: bool,
-    pub search_engine: SearchEngine,
-    pub searxng_url: Option<&'a str>,
+    pub web: WebToolConfig<'a>,
     pub local_texts: &'a [String],
 }
 
 /// Runtime context supplied to [`Tool::execute_approved`].
 pub struct ToolContext<'a> {
     pub granted_folders: &'a [GrantedFolder],
-    pub web_search_enabled: bool,
-    pub search_engine: SearchEngine,
-    pub searxng_url: Option<&'a str>,
+    pub web: WebToolConfig<'a>,
 }
 
 /// Pre-flight authorization decision returned by [`Tool::prepare`].
-#[derive(Debug, Clone)]
 pub enum ToolAuthorization {
     /// Allowed immediately without prompting.
-    AutoAllowed,
-    /// Rejected before prompting (e.g., disabled feature, invalid URL, missing arg).
+    AutoAllowed(PreparedToolCall),
+    /// Rejected before prompting (e.g., disabled feature, invalid URL, malformed args).
     Rejected {
         status: ToolCallStatus,
         reason: String,
@@ -63,7 +98,32 @@ pub enum ToolAuthorization {
         request: ApprovalRequest,
         ungranted_path: Option<PathBuf>,
         write_target_folder: Option<PathBuf>,
+        prepared: PreparedToolCall,
     },
+}
+
+impl fmt::Debug for ToolAuthorization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AutoAllowed(_) => f.debug_tuple("AutoAllowed").finish(),
+            Self::Rejected { status, reason } => f
+                .debug_struct("Rejected")
+                .field("status", status)
+                .field("reason", reason)
+                .finish(),
+            Self::RequiresApproval {
+                request,
+                ungranted_path,
+                write_target_folder,
+                ..
+            } => f
+                .debug_struct("RequiresApproval")
+                .field("request", request)
+                .field("ungranted_path", ungranted_path)
+                .field("write_target_folder", write_target_folder)
+                .finish(),
+        }
+    }
 }
 
 /// Structured user approval request emitted before executing sensitive tools.
@@ -72,9 +132,7 @@ pub enum ApprovalRequest {
     ToolAction {
         tool_name: String,
         preview: String,
-        #[allow(dead_code)]
         risk: ToolRisk,
-        #[allow(dead_code)]
         ungranted_path: Option<PathBuf>,
     },
     WebSearch {
@@ -90,8 +148,14 @@ pub enum ApprovalRequest {
 
 /// Unified interface implemented by built-in file tools, web tools, and future MCP tools.
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn risk(&self) -> ToolRisk;
+    fn metadata(&self) -> ToolMetadata;
+
+    /// Whether outputs from this tool should be scanned by `privacy_guard` before web requests.
+    fn produces_sensitive_local_context(&self) -> bool {
+        false
+    }
 
     /// Validate arguments and compute authorization/approval requirements before execution.
     fn prepare<'a>(
@@ -106,15 +170,15 @@ pub trait Tool: Send + Sync {
     }
 
     /// Message returned to the model if the user denies approval.
-    fn denied_message(&self) -> &'static str {
-        "User denied permission."
+    fn denied_message(&self) -> Cow<'static, str> {
+        Cow::Borrowed("User denied permission.")
     }
 
-    /// Execute the tool after authorization (using any user-edited approval payload).
+    /// Execute the tool after authorization (using the prepared payload and any user edits).
     fn execute_approved<'a>(
         &'a self,
         ctx: &'a ToolContext<'a>,
-        args: &'a Value,
+        prepared: PreparedToolCall,
         approval: &'a ApprovalResponse,
     ) -> BoxFuture<'a, Result<String>>;
 }

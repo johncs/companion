@@ -69,33 +69,28 @@ pub(super) fn attach_key_controller(
     text_view.add_controller(key_ctrl);
 }
 
-/// Attach drag-and-drop file handling onto the composer card.
-pub(super) fn attach_file_drop_target(
-    composer_card: &gtk::Box,
-    sender: &ComponentSender<ComposerModel>,
-) {
-    let drop_target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
-    let sender_drop = sender.clone();
-    drop_target.connect_drop(move |_, value, _, _| {
-        if let Ok(file_list) = value.get::<gdk::FileList>() {
-            let paths: Vec<PathBuf> = file_list
-                .files()
-                .into_iter()
-                .filter_map(|f| f.path())
-                .collect();
-            if !paths.is_empty() {
-                sender_drop.input(ComposerMsg::FilesDropped(paths));
-                return true;
-            }
+/// Remove orphaned clipboard temp images left behind by previous runs.
+pub fn cleanup_orphaned_clipboard_files(clipboard_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(clipboard_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_pasted_png = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("pasted-") && n.ends_with(".png"));
+        if is_pasted_png && path.is_file() {
+            let _ = std::fs::remove_file(&path);
         }
-        false
-    });
-    composer_card.add_controller(drop_target);
+    }
 }
 
 /// Handle image/file paste into the composer, or trim trailing blank lines on text paste.
 pub(super) fn attach_clipboard_paste_handler(
     text_view: &gtk::TextView,
+    clipboard_dir: PathBuf,
+    rt_handle: tokio::runtime::Handle,
     sender: &ComponentSender<ComposerModel>,
 ) {
     let sender_paste = sender.clone();
@@ -105,7 +100,7 @@ pub(super) fn attach_clipboard_paste_handler(
 
         if formats.contains_type(gdk::Texture::static_type()) {
             tv.stop_signal_emission_by_name("paste-clipboard");
-            paste_texture_from_clipboard(&clipboard, &sender_paste);
+            paste_texture_from_clipboard(&clipboard, &clipboard_dir, &rt_handle, &sender_paste);
             return;
         }
         if formats.contains_type(gdk::FileList::static_type()) {
@@ -142,16 +137,21 @@ pub(super) fn attach_clipboard_paste_handler(
 
 fn paste_texture_from_clipboard(
     clipboard: &gdk::Clipboard,
+    clipboard_dir: &std::path::Path,
+    rt_handle: &tokio::runtime::Handle,
     sender: &ComponentSender<ComposerModel>,
 ) {
     let sender_clip = sender.clone();
+    let dest_dir = clipboard_dir.to_path_buf();
+    let rt_handle = rt_handle.clone();
     clipboard.read_texture_async(None::<&gio::Cancellable>, move |res| match res {
         Ok(Some(texture)) => {
             let png_bytes = texture.save_to_png_bytes();
-            let dest_dir = glib::user_data_dir().join("companion").join("clipboard");
             let dest_path = dest_dir.join(format!("pasted-{}.png", uuid::Uuid::new_v4()));
+            let dest_dir = dest_dir.clone();
             let sender_ui = sender_clip.clone();
             spawn_blocking_ui(
+                &rt_handle,
                 move || {
                     std::fs::create_dir_all(&dest_dir)
                         .and_then(|_| std::fs::write(&dest_path, png_bytes.as_ref()))
@@ -195,7 +195,6 @@ fn paste_file_list_from_clipboard(
                         .files()
                         .into_iter()
                         .filter_map(|f| f.path())
-                        .filter(|p| p.is_file())
                         .collect();
                     if !paths.is_empty() {
                         sender_clip.input(ComposerMsg::FilesDropped(paths));
@@ -225,7 +224,6 @@ fn paste_single_file_from_clipboard(
             Ok(val) => {
                 if let Ok(file) = val.get::<gio::File>()
                     && let Some(path) = file.path()
-                    && path.is_file()
                 {
                     sender_clip.input(ComposerMsg::FilesDropped(vec![path]));
                 }
@@ -272,8 +270,20 @@ pub(super) fn attach_dynamic_height_scaler(text_view: &gtk::TextView) {
         .parent()
         .and_then(|p| p.downcast::<gtk::ScrolledWindow>().ok())
     {
+        // Track one-time handler attachment so remapping never stacks duplicate `gtk::Window` signals.
+        let attached = std::cell::Cell::new(false);
         scroller.connect_map(move |s| {
+            if attached.get() {
+                if let Some(win) = s.root().and_downcast::<gtk::Window>() {
+                    let h = win.height();
+                    if h > 0 {
+                        s.set_max_content_height(((h as f64) * 0.45).round().max(160.0) as i32);
+                    }
+                }
+                return;
+            }
             if let Some(win) = s.root().and_downcast::<gtk::Window>() {
+                attached.set(true);
                 let update_max_height = {
                     let s = s.clone();
                     let win = win.clone();
@@ -327,7 +337,7 @@ mod tests {
         let models = vec![ModelRecord {
             id: "m1".into(),
             display_name: "M1".into(),
-            provider_type: "llama_cpp".into(),
+            provider_type: crate::core::types::ModelProviderType::LlamaCpp,
             file_path: None,
             mmproj_path: None,
             hf_repo: None,
@@ -342,5 +352,21 @@ mod tests {
 
         assert_eq!(extract_model_n_ctx(&models, Some("m1")), 16384);
         assert_eq!(extract_model_n_ctx(&models, None), 4096);
+    }
+
+    #[test]
+    fn cleanup_orphaned_clipboard_files_removes_only_pasted_pngs() {
+        let dir = std::env::temp_dir().join(format!("companion_clip_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pasted = dir.join("pasted-123.png");
+        let keep = dir.join("notes.txt");
+        std::fs::write(&pasted, b"png").unwrap();
+        std::fs::write(&keep, b"keep").unwrap();
+
+        cleanup_orphaned_clipboard_files(&dir);
+
+        assert!(!pasted.exists());
+        assert!(keep.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

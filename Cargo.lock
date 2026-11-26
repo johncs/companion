@@ -271,6 +271,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "companion-core",
+ "companion-format",
  "companion-storage",
  "reqwest",
  "serde",
@@ -288,6 +289,7 @@ dependencies = [
  "chrono",
  "companion-agent",
  "companion-core",
+ "companion-format",
  "companion-inference",
  "companion-models",
  "companion-storage",
@@ -308,12 +310,23 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gettext-rs",
- "pdf-extract",
- "pulldown-cmark",
  "serde",
  "serde_json",
- "syntect",
+ "thiserror",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "companion-format"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "companion-core",
+ "pdf-extract",
+ "pulldown-cmark",
+ "syntect",
+ "thiserror",
  "tracing",
  "uuid",
 ]
@@ -340,7 +353,7 @@ dependencies = [
  "futures-util",
  "reqwest",
  "serde",
- "serde_json",
+ "thiserror",
  "tokio",
  "tracing",
  "uuid",
@@ -356,6 +369,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "thiserror",
  "uuid",
 ]
 

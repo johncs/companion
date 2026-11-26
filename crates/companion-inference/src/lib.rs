@@ -7,3 +7,4 @@ pub use companion_core::provider;
 pub mod llama_cpp;
 pub mod stop_filter;
 pub mod think_parser;
+pub mod token_pipeline;

@@ -1,220 +1,227 @@
 //! Per-model inference configuration dialog and pure form-state logic.
 
+use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
+use gtk::glib;
 
 use crate::core::ThinkingLevel;
-use crate::core::markdown::escape_pango_markup;
-use crate::core::model_params::ModelParams;
+use crate::format::markdown::escape_pango_markup;
 use crate::i18n::{gettext, tr_f};
 use crate::models::friendly_model_name;
+use crate::models::gguf::GgufMetadataCache;
 use crate::storage::{Database, ModelRecord};
 
-/// Pure, unit-testable form state for [`present_model_config_dialog`].
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ModelConfigFormState {
-    pub ctx_presets: Vec<u32>,
-    pub init_ctx_idx: u32,
-    pub default_ctx_idx: u32,
-    pub init_thinking_idx: u32,
-    pub init_gpu_enabled: bool,
-    pub init_temp_cents: i64,
-}
-
-impl ModelConfigFormState {
-    pub fn from_model(model: &ModelRecord, max_ctx: u32) -> Self {
-        let ctx_presets = crate::models::gguf::context_presets_up_to(max_ctx);
-        let init_ctx = model.default_params.n_ctx;
-        let init_ctx_idx = ctx_presets
-            .iter()
-            .rposition(|&v| v <= init_ctx.min(max_ctx))
-            .unwrap_or(0) as u32;
-        let default_ctx_idx = ctx_presets
-            .iter()
-            .rposition(|&v| v <= 4096_u32.min(max_ctx))
-            .unwrap_or(0) as u32;
-        let init_thinking = model.default_thinking_level();
-        let init_thinking_idx = ThinkingLevel::ALL
-            .iter()
-            .position(|t| *t == init_thinking)
-            .unwrap_or(0) as u32;
-        let init_temp_cents = (f64::from(model.default_params.temperature) * 100.0).round() as i64;
-        Self {
-            ctx_presets,
-            init_ctx_idx,
-            default_ctx_idx,
-            init_thinking_idx,
-            init_gpu_enabled: model.default_params.n_gpu_layers > 0,
-            init_temp_cents,
-        }
-    }
-
-    pub fn is_dirty(&self, ctx_idx: u32, thinking_idx: u32, gpu: bool, temp_cents: i64) -> bool {
-        ctx_idx != self.init_ctx_idx
-            || thinking_idx != self.init_thinking_idx
-            || gpu != self.init_gpu_enabled
-            || temp_cents != self.init_temp_cents
-    }
-
-    pub fn is_default(&self, ctx_idx: u32, thinking_idx: u32, gpu: bool, temp_cents: i64) -> bool {
-        ctx_idx == self.default_ctx_idx && thinking_idx == 0 && gpu && temp_cents == 100
-    }
-
-    pub fn to_model_params(
-        &self,
-        ctx_idx: u32,
-        thinking_idx: u32,
-        gpu: bool,
-        temp_value: f64,
-        existing_max_tokens: u32,
-    ) -> ModelParams {
-        ModelParams {
-            n_ctx: self
-                .ctx_presets
-                .get(ctx_idx as usize)
-                .copied()
-                .unwrap_or(4096),
-            n_gpu_layers: if gpu { 99 } else { 0 },
-            max_tokens: existing_max_tokens,
-            temperature: ((temp_value * 100.0).round() / 100.0) as f32,
-            thinking_level: ThinkingLevel::from_index(thinking_idx),
-        }
-    }
-}
+use super::model_config_form_state::ModelConfigFormState;
 
 /// Present the per-model settings [`adw::Dialog`].
 pub fn present_model_config_dialog(
     parent: &impl IsA<gtk::Widget>,
     db: Database,
+    rt_handle: tokio::runtime::Handle,
+    gguf_cache: Arc<GgufMetadataCache>,
     model: ModelRecord,
     parent_dialog: adw::PreferencesDialog,
     on_saved: Rc<dyn Fn()>,
 ) {
-    let dialog = adw::Dialog::builder()
-        .title(gettext("Configure AI Model"))
-        .content_width(540)
-        .content_height(560)
-        .build();
+    let crate::ui::dialog_scaffold::DialogScaffold {
+        dialog,
+        toolbar,
+        primary_btn: save_btn,
+    } = crate::ui::dialog_scaffold::build_dialog_scaffold(
+        &gettext("Configure AI Model"),
+        540,
+        560,
+        &gettext("Save"),
+        false,
+    );
 
-    let toolbar = adw::ToolbarView::new();
-    let header = adw::HeaderBar::builder()
-        .show_start_title_buttons(false)
-        .show_end_title_buttons(false)
-        .build();
-    let cancel_btn = gtk::Button::with_label(&gettext("Cancel"));
-    let save_btn = gtk::Button::with_label(&gettext("Save"));
-    save_btn.add_css_class("suggested-action");
-    save_btn.set_sensitive(false);
-    header.pack_start(&cancel_btn);
-    header.pack_end(&save_btn);
-    toolbar.add_top_bar(&header);
+    let (form, ctx_row, thinking_row, gpu_row, temp_row) =
+        build_and_wire_dialog_body(&toolbar, &model, &gguf_cache, &rt_handle, &save_btn);
+    wire_model_save_button(
+        &save_btn,
+        &dialog,
+        &model,
+        &form,
+        (&ctx_row, &thinking_row, &gpu_row, &temp_row),
+        (db, rt_handle, gguf_cache, parent_dialog, on_saved),
+    );
+    dialog.present(Some(parent));
+}
 
-    let max_ctx = model
-        .file_path
-        .as_deref()
-        .and_then(|p| crate::models::detect_gguf_max_context(std::path::Path::new(p)))
-        .unwrap_or(131072);
-    let form = Rc::new(ModelConfigFormState::from_model(&model, max_ctx));
-
-    let info_group = build_info_group(&model);
-    let (group, ctx_row, thinking_row, gpu_row, temp_row) = build_controls_group(&form, max_ctx);
-    let reset_btn = gtk::Button::builder()
-        .label(gettext("Reset to Default"))
-        .halign(gtk::Align::Start)
-        .build();
-
+fn build_and_wire_dialog_body(
+    toolbar: &adw::ToolbarView,
+    model: &ModelRecord,
+    gguf_cache: &Arc<GgufMetadataCache>,
+    rt_handle: &tokio::runtime::Handle,
+    save_btn: &gtk::Button,
+) -> (
+    Rc<RefCell<ModelConfigFormState>>,
+    adw::ComboRow,
+    adw::ComboRow,
+    adw::SwitchRow,
+    adw::SpinRow,
+) {
+    let init_max_ctx = model.default_params.n_ctx.max(131072);
+    let form = Rc::new(RefCell::new(ModelConfigFormState::from_model(
+        model,
+        init_max_ctx,
+    )));
+    let (reset_btn, info_group, (group, ctx_row, thinking_row, gpu_row, temp_row)) = (
+        gtk::Button::with_label(&gettext("Reset to Default")),
+        build_info_group(model),
+        build_controls_group(&form.borrow(), init_max_ctx),
+    );
+    reset_btn.set_halign(gtk::Align::Start);
+    spawn_gguf_max_ctx_probe(model, gguf_cache, rt_handle, &form, &ctx_row);
     wire_form_signals(
         &form,
         &ctx_row,
         &thinking_row,
         &gpu_row,
         &temp_row,
-        &save_btn,
+        save_btn,
         &reset_btn,
     );
+    attach_dialog_scroller(toolbar, &info_group, &group, &reset_btn);
+    (form, ctx_row, thinking_row, gpu_row, temp_row)
+}
 
+fn attach_dialog_scroller(
+    toolbar: &adw::ToolbarView,
+    info_group: &adw::PreferencesGroup,
+    group: &adw::PreferencesGroup,
+    reset_btn: &gtk::Button,
+) {
     let content_box = crate::ui::widgets::dialog_content_box();
-    content_box.append(&info_group);
-    content_box.append(&group);
-    content_box.append(&reset_btn);
-
+    content_box.append(info_group);
+    content_box.append(group);
+    content_box.append(reset_btn);
     let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .child(&content_box)
         .build();
     toolbar.set_content(Some(&scroller));
-    dialog.set_child(Some(&toolbar));
+}
 
-    let d_cancel = dialog.clone();
-    cancel_btn.connect_clicked(move |_| {
-        d_cancel.close();
-    });
+type ModelSaveDeps = (
+    Database,
+    tokio::runtime::Handle,
+    Arc<GgufMetadataCache>,
+    adw::PreferencesDialog,
+    Rc<dyn Fn()>,
+);
 
-    let d_save = dialog.clone();
+fn wire_model_save_button(
+    save_btn: &gtk::Button,
+    dialog: &adw::Dialog,
+    model: &ModelRecord,
+    form: &Rc<RefCell<ModelConfigFormState>>,
+    rows: (
+        &adw::ComboRow,
+        &adw::ComboRow,
+        &adw::SwitchRow,
+        &adw::SpinRow,
+    ),
+    deps: ModelSaveDeps,
+) {
+    let (ctx_row, thinking_row, gpu_row, temp_row) = (
+        rows.0.clone(),
+        rows.1.clone(),
+        rows.2.clone(),
+        rows.3.clone(),
+    );
+    let (db, rt_handle, gguf_cache, parent_dialog, on_saved) = deps;
+    let (d_save, model, form) = (dialog.downgrade(), model.clone(), form.clone());
     save_btn.connect_clicked(move |_| {
         let mut updated = model.clone();
-        updated.default_params = form.to_model_params(
+        updated.default_params = form.borrow().to_model_params(
             ctx_row.selected(),
             thinking_row.selected(),
             gpu_row.is_active(),
             temp_row.value(),
             model.default_params.max_tokens,
         );
-        let db = db.clone();
-        let parent_dialog = parent_dialog.clone();
-        let on_saved = on_saved.clone();
-        crate::ui::widgets::spawn_blocking_ui(
-            move || -> Result<(), String> {
-                updated.supports_thinking = updated
-                    .file_path
-                    .as_deref()
-                    .map(std::path::Path::new)
-                    .is_some_and(crate::models::detect_gguf_supports_thinking)
-                    || updated.supports_thinking;
-                db.upsert_model(&updated).map_err(|e| e.to_string())
-            },
-            move |res| match res {
-                Ok(()) => {
-                    parent_dialog.add_toast(adw::Toast::new(&gettext("Saved model settings")));
-                    on_saved();
-                }
-                Err(err) => {
-                    parent_dialog.add_toast(adw::Toast::new(&tr_f(
-                        "Failed to save: {err}",
-                        &[("err", &err)],
-                    )));
-                }
-            },
+        save_model_config_async(
+            &rt_handle,
+            &db,
+            &gguf_cache,
+            updated,
+            &parent_dialog,
+            &on_saved,
+            &d_save,
         );
-        d_save.close();
     });
+}
 
-    dialog.present(Some(parent));
+fn save_model_config_async(
+    rt_handle: &tokio::runtime::Handle,
+    db: &Database,
+    gguf_cache: &Arc<GgufMetadataCache>,
+    mut updated: ModelRecord,
+    parent_dialog: &adw::PreferencesDialog,
+    on_saved: &Rc<dyn Fn()>,
+    d_save: &glib::WeakRef<adw::Dialog>,
+) {
+    let (db, cache, parent_dialog, on_saved, d_close) = (
+        db.clone(),
+        gguf_cache.clone(),
+        parent_dialog.clone(),
+        on_saved.clone(),
+        d_save.clone(),
+    );
+    crate::ui::widgets::spawn_blocking_ui(
+        rt_handle,
+        move || -> Result<(), String> {
+            updated.supports_thinking = updated
+                .file_path
+                .as_deref()
+                .map(std::path::Path::new)
+                .is_some_and(|p| cache.inspect(p).supports_thinking)
+                || updated.supports_thinking;
+            db.upsert_model(&updated).map_err(|e| e.to_string())
+        },
+        move |res| match res {
+            Ok(()) => {
+                parent_dialog.add_toast(adw::Toast::new(&gettext("Saved model settings")));
+                on_saved();
+                if let Some(d) = d_close.upgrade() {
+                    d.close();
+                }
+            }
+            Err(err) => {
+                tracing::error!("Failed to save model settings: {err}");
+                parent_dialog.add_toast(adw::Toast::new(&tr_f(
+                    "Failed to save: {err}",
+                    &[("err", &err)],
+                )));
+            }
+        },
+    );
 }
 
 fn build_info_group(model: &ModelRecord) -> adw::PreferencesGroup {
     let info_group = adw::PreferencesGroup::new();
     let friendly = friendly_model_name(&model.display_name);
-    let name_row = adw::ActionRow::builder()
-        .title(gettext("AI Model Name"))
-        .subtitle(escape_pango_markup(&friendly))
-        .build();
-    name_row.add_css_class("property");
-
     let file_name = model
         .file_path
         .as_deref()
         .and_then(|p| std::path::Path::new(p).file_name().and_then(|n| n.to_str()))
         .unwrap_or("—");
-    let file_row = adw::ActionRow::builder()
-        .title(gettext("AI Model File"))
-        .subtitle(escape_pango_markup(file_name))
-        .build();
-    file_row.add_css_class("property");
-    info_group.add(&name_row);
-    info_group.add(&file_row);
+    for (title, value) in [
+        (gettext("AI Model Name"), friendly.as_str()),
+        (gettext("AI Model File"), file_name),
+    ] {
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(escape_pango_markup(value))
+            .build();
+        row.add_css_class("property");
+        info_group.add(&row);
+    }
     info_group
 }
 
@@ -250,12 +257,24 @@ fn build_controls_group(
         .subtitle(gettext("Run model on GPU via Vulkan"))
         .active(form.init_gpu_enabled)
         .build();
-
     let temp_row = adw::SpinRow::with_range(0.0, 2.0, 0.05);
     temp_row.set_title(&gettext("Temperature"));
     temp_row.set_digits(2);
     temp_row.set_value(form.init_temp_cents as f64 / 100.0);
 
+    let thinking_row = build_default_thinking_row(form.init_thinking_idx);
+    for w in [
+        ctx_row.upcast_ref::<gtk::Widget>(),
+        thinking_row.upcast_ref(),
+        gpu_row.upcast_ref(),
+        temp_row.upcast_ref(),
+    ] {
+        group.add(w);
+    }
+    (group, ctx_row, thinking_row, gpu_row, temp_row)
+}
+
+fn build_default_thinking_row(init_idx: u32) -> adw::ComboRow {
     let thinking_labels: Vec<String> = ThinkingLevel::ALL.iter().map(|t| t.label()).collect();
     let thinking_refs: Vec<&str> = thinking_labels.iter().map(String::as_str).collect();
     let thinking_row = adw::ComboRow::builder()
@@ -263,17 +282,55 @@ fn build_controls_group(
         .subtitle(gettext("Applied automatically when starting a new chat"))
         .model(&gtk::StringList::new(&thinking_refs))
         .build();
-    thinking_row.set_selected(form.init_thinking_idx);
+    thinking_row.set_selected(init_idx);
+    thinking_row
+}
 
-    group.add(&ctx_row);
-    group.add(&thinking_row);
-    group.add(&gpu_row);
-    group.add(&temp_row);
-    (group, ctx_row, thinking_row, gpu_row, temp_row)
+fn spawn_gguf_max_ctx_probe(
+    model: &ModelRecord,
+    gguf_cache: &Arc<GgufMetadataCache>,
+    rt_handle: &tokio::runtime::Handle,
+    form: &Rc<RefCell<ModelConfigFormState>>,
+    ctx_row: &adw::ComboRow,
+) {
+    let Some(model_path) = model.file_path.as_deref() else {
+        return;
+    };
+    let path = std::path::PathBuf::from(model_path);
+    let (cache, form_async, ctx_row_weak, model_async) = (
+        gguf_cache.clone(),
+        form.clone(),
+        ctx_row.downgrade(),
+        model.clone(),
+    );
+    crate::ui::widgets::spawn_blocking_ui(
+        rt_handle,
+        move || cache.inspect(&path).max_context,
+        move |detected| {
+            let Some(max_ctx) = detected else { return };
+            let Some(row) = ctx_row_weak.upgrade() else {
+                return;
+            };
+            let updated = ModelConfigFormState::from_model(&model_async, max_ctx);
+            let labels: Vec<String> = updated
+                .ctx_presets
+                .iter()
+                .map(|&v| crate::models::gguf::format_context_label(v))
+                .collect();
+            let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+            row.set_model(Some(&gtk::StringList::new(&refs)));
+            row.set_selected(updated.init_ctx_idx);
+            row.set_subtitle(&tr_f(
+                "Max supported by model: {max}",
+                &[("max", &crate::models::gguf::format_short_context(max_ctx))],
+            ));
+            *form_async.borrow_mut() = updated;
+        },
+    );
 }
 
 fn wire_form_signals(
-    form: &Rc<ModelConfigFormState>,
+    form: &Rc<RefCell<ModelConfigFormState>>,
     ctx_row: &adw::ComboRow,
     thinking_row: &adw::ComboRow,
     gpu_row: &adw::SwitchRow,
@@ -281,32 +338,30 @@ fn wire_form_signals(
     save_btn: &gtk::Button,
     reset_btn: &gtk::Button,
 ) {
-    let update: Rc<dyn Fn()> = {
-        let (form, ctx_row, thinking_row, gpu_row, temp_row, save_btn, reset_btn) = (
-            form.clone(),
-            ctx_row.clone(),
-            thinking_row.clone(),
-            gpu_row.clone(),
-            temp_row.clone(),
-            save_btn.clone(),
-            reset_btn.clone(),
+    let (f_c, c_c, th_c, g_c, te_c, s_c, r_c) = (
+        form.clone(),
+        ctx_row.clone(),
+        thinking_row.clone(),
+        gpu_row.clone(),
+        temp_row.clone(),
+        save_btn.clone(),
+        reset_btn.clone(),
+    );
+    let update: Rc<dyn Fn()> = Rc::new(move || {
+        let f = f_c.borrow();
+        let (cc, ct, cg, cte) = (
+            c_c.selected(),
+            th_c.selected(),
+            g_c.is_active(),
+            (te_c.value() * 100.0).round() as i64,
         );
-        Rc::new(move || {
-            let cur_ctx = ctx_row.selected();
-            let cur_thinking = thinking_row.selected();
-            let cur_gpu = gpu_row.is_active();
-            let cur_temp = (temp_row.value() * 100.0).round() as i64;
-            save_btn.set_sensitive(form.is_dirty(cur_ctx, cur_thinking, cur_gpu, cur_temp));
-            reset_btn.set_sensitive(!form.is_default(cur_ctx, cur_thinking, cur_gpu, cur_temp));
-        })
-    };
+        s_c.set_sensitive(f.is_dirty(cc, ct, cg, cte));
+        r_c.set_sensitive(!f.is_default(cc, ct, cg, cte));
+    });
     update();
-
-    let u1 = update.clone();
+    let (u1, u2, u3) = (update.clone(), update.clone(), update.clone());
     ctx_row.connect_selected_notify(move |_| u1());
-    let u2 = update.clone();
     thinking_row.connect_selected_notify(move |_| u2());
-    let u3 = update.clone();
     gpu_row.connect_active_notify(move |_| u3());
     temp_row.connect_value_notify(move |_| update());
 
@@ -318,7 +373,7 @@ fn wire_form_signals(
         temp_row.clone(),
     );
     reset_btn.connect_clicked(move |_| {
-        ctx_r.set_selected(form_r.default_ctx_idx);
+        ctx_r.set_selected(form_r.borrow().default_ctx_idx);
         thinking_r.set_selected(0);
         gpu_r.set_active(true);
         temp_r.set_value(1.0);
@@ -326,40 +381,4 @@ fn wire_form_signals(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn dummy_model(params: ModelParams) -> ModelRecord {
-        ModelRecord {
-            id: "m1".into(),
-            display_name: "Test".into(),
-            provider_type: "llama_cpp".into(),
-            file_path: None,
-            mmproj_path: None,
-            hf_repo: None,
-            quantization: None,
-            supports_thinking: true,
-            default_params: params,
-            avg_tokens_per_sec: None,
-        }
-    }
-
-    #[test]
-    fn form_state_tracks_dirty_default_and_save_params() {
-        let model = dummy_model(ModelParams::default());
-        let state = ModelConfigFormState::from_model(&model, 32768);
-
-        assert!(!state.is_dirty(state.init_ctx_idx, 0, true, 100));
-        assert!(state.is_default(state.default_ctx_idx, 0, true, 100));
-
-        assert!(state.is_dirty(state.init_ctx_idx + 1, 0, true, 100));
-        assert!(!state.is_default(state.default_ctx_idx, 1, false, 70));
-
-        let saved = state.to_model_params(state.default_ctx_idx, 1, false, 0.7, 2048);
-        assert_eq!(saved.n_ctx, 4096);
-        assert_eq!(saved.n_gpu_layers, 0);
-        assert_eq!(saved.max_tokens, 2048);
-        assert!((saved.temperature - 0.7).abs() < 1e-4);
-        assert_eq!(saved.thinking_level, ThinkingLevel::from_index(1));
-    }
-}
+mod tests {}

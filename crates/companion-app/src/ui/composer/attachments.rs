@@ -6,12 +6,10 @@ use adw::prelude::*;
 use gtk::gio;
 use relm4::prelude::*;
 
-use crate::core::attachments::{AttachmentKind, classify_path, process_attachment_file};
+use crate::core::types::StagedAttachment;
+use crate::format::attachments::{AttachmentKind, classify_path, process_attachment_file};
 use crate::i18n::gettext;
-use crate::storage::AttachmentRecord;
-use crate::ui::widgets::{
-    build_document_tile, build_image_thumbnail, present_image_lightbox, spawn_blocking_ui,
-};
+use crate::ui::widgets::{build_document_tile, build_image_thumbnail_button, spawn_blocking_ui};
 
 use super::{ComposerModel, ComposerMsg, ComposerOutput};
 
@@ -20,7 +18,7 @@ pub(super) struct PendingChip {
     pub(super) temp_id: String,
     pub(super) file_name: String,
     pub(super) is_loading: bool,
-    pub(super) record: Option<AttachmentRecord>,
+    pub(super) record: Option<StagedAttachment>,
 }
 
 #[derive(Default, Clone)]
@@ -46,7 +44,7 @@ impl AttachmentQueue {
         });
     }
 
-    pub(super) fn mark_loaded(&mut self, temp_id: &str, record: AttachmentRecord) {
+    pub(super) fn mark_loaded(&mut self, temp_id: &str, record: StagedAttachment) {
         if let Some(chip) = self.chips.iter_mut().find(|c| c.temp_id == temp_id) {
             chip.is_loading = false;
             chip.record = Some(record);
@@ -57,7 +55,7 @@ impl AttachmentQueue {
         self.chips.retain(|c| c.temp_id != temp_id);
     }
 
-    pub(super) fn take_ready(&mut self) -> Vec<AttachmentRecord> {
+    pub(super) fn take_ready(&mut self) -> Vec<StagedAttachment> {
         let ready = self.chips.iter().filter_map(|c| c.record.clone()).collect();
         self.chips.clear();
         ready
@@ -96,19 +94,43 @@ pub(super) fn open_attach_file_dialog(
     });
 }
 
-pub(super) fn enqueue_dropped_paths(
+pub(super) fn classify_dropped_paths(
+    paths: Vec<PathBuf>,
+    rt_handle: &tokio::runtime::Handle,
+    sender: &ComponentSender<ComposerModel>,
+) {
+    let sender_clone = sender.clone();
+    spawn_blocking_ui(
+        rt_handle,
+        move || {
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+            for path in paths {
+                if path.is_dir() {
+                    dirs.push(std::fs::canonicalize(&path).unwrap_or(path));
+                } else if path.is_file() {
+                    files.push(path);
+                }
+            }
+            (dirs, files)
+        },
+        move |(dirs, files)| {
+            if !dirs.is_empty() || !files.is_empty() {
+                sender_clone.input(ComposerMsg::PathsClassified { dirs, files });
+            }
+        },
+    );
+}
+
+pub(super) fn enqueue_classified_files(
     queue: &mut AttachmentQueue,
     paths: Vec<PathBuf>,
     has_mmproj: bool,
     chips_box: &gtk::Box,
+    rt_handle: &tokio::runtime::Handle,
     sender: &ComponentSender<ComposerModel>,
 ) {
     for path in paths {
-        if path.is_dir() {
-            let canon = std::fs::canonicalize(&path).unwrap_or(path);
-            let _ = sender.output(ComposerOutput::GrantFolder(canon));
-            continue;
-        }
         if classify_path(&path) == AttachmentKind::Image && !has_mmproj {
             let _ = sender.output(ComposerOutput::ShowToast(gettext(
                 "Active AI model has no vision projector (mmproj) configured in Settings → AI Models",
@@ -127,6 +149,7 @@ pub(super) fn enqueue_dropped_paths(
 
         let sender_clone = sender.clone();
         spawn_blocking_ui(
+            rt_handle,
             move || process_attachment_file(&path).map_err(|e| e.to_string()),
             move |result| {
                 sender_clone.input(ComposerMsg::AttachmentLoaded { temp_id, result });
@@ -152,79 +175,76 @@ pub(super) fn rebuild_chips_box(
 
     for chip in queue.chips() {
         if chip.is_loading {
-            let pill = gtk::Box::builder()
-                .orientation(gtk::Orientation::Horizontal)
-                .spacing(6)
-                .tooltip_text(&chip.file_name)
-                .css_classes(["attachment-chip"])
-                .build();
-            let spinner = gtk::Spinner::new();
-            spinner.start();
-            pill.append(&spinner);
-            pill.append(
-                &gtk::Label::builder()
-                    .label(&chip.file_name)
-                    .css_classes(["caption"])
-                    .ellipsize(gtk::pango::EllipsizeMode::Middle)
-                    .max_width_chars(20)
-                    .build(),
-            );
-            chips_box.append(&pill);
-            continue;
-        }
-
-        if let Some(rec) = &chip.record {
-            let overlay = gtk::Overlay::new();
-            overlay.set_halign(gtk::Align::Start);
-            overlay.set_valign(gtk::Align::Center);
-            overlay.set_vexpand(false);
-            if rec.mime_type.starts_with("image/") {
-                let thumb = build_image_thumbnail(&rec.file_path, 84);
-                let thumb_btn = gtk::Button::builder()
-                    .child(&thumb)
-                    .halign(gtk::Align::Start)
-                    .valign(gtk::Align::Center)
-                    .tooltip_text(&rec.file_name)
-                    .css_classes(["flat", "thumb-btn"])
-                    .build();
-                let fname = rec.file_name.clone();
-                let fpath = rec.file_path.clone();
-                let chips_box_ref = chips_box.clone();
-                thumb_btn.connect_clicked(move |_| {
-                    present_image_lightbox(&chips_box_ref, &fname, &fpath);
-                });
-                overlay.set_child(Some(&thumb_btn));
-            } else {
-                let doc_tile = build_document_tile(&rec.file_name, &rec.mime_type, 84);
-                overlay.set_child(Some(&doc_tile));
-            }
-
-            let remove_btn = gtk::Button::builder()
-                .icon_name("window-close-symbolic")
-                .tooltip_text(gettext("Remove attachment"))
-                .halign(gtk::Align::End)
-                .valign(gtk::Align::Start)
-                .css_classes(["thumb-remove-btn"])
-                .build();
-            let tid = chip.temp_id.clone();
-            let sender_clone = sender.clone();
-            remove_btn.connect_clicked(move |_| {
-                sender_clone.input(ComposerMsg::RemoveAttachment(tid.clone()));
-            });
-            overlay.add_overlay(&remove_btn);
-            chips_box.append(&overlay);
+            chips_box.append(&build_loading_chip(&chip.file_name));
+        } else if let Some(rec) = &chip.record {
+            chips_box.append(&build_ready_chip(rec, &chip.temp_id, sender));
         }
     }
+}
+
+fn build_loading_chip(file_name: &str) -> gtk::Box {
+    let pill = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .tooltip_text(file_name)
+        .css_classes(["attachment-chip"])
+        .build();
+    let spinner = gtk::Spinner::new();
+    spinner.start();
+    pill.append(&spinner);
+    pill.append(
+        &gtk::Label::builder()
+            .label(file_name)
+            .css_classes(["caption"])
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(20)
+            .build(),
+    );
+    pill
+}
+
+fn build_ready_chip(
+    rec: &StagedAttachment,
+    temp_id: &str,
+    sender: &ComponentSender<ComposerModel>,
+) -> gtk::Overlay {
+    let overlay = gtk::Overlay::new();
+    overlay.set_halign(gtk::Align::Start);
+    overlay.set_valign(gtk::Align::Center);
+    overlay.set_vexpand(false);
+    if rec.mime_type.starts_with("image/") {
+        overlay.set_child(Some(&build_image_thumbnail_button(
+            &rec.file_path,
+            &rec.file_name,
+            84,
+        )));
+    } else {
+        overlay.set_child(Some(&build_document_tile(
+            &rec.file_name,
+            &rec.mime_type,
+            84,
+        )));
+    }
+    let remove_btn = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .tooltip_text(gettext("Remove attachment"))
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .css_classes(["thumb-remove-btn"])
+        .build();
+    let (tid, sender_clone) = (temp_id.to_string(), sender.clone());
+    remove_btn
+        .connect_clicked(move |_| sender_clone.input(ComposerMsg::RemoveAttachment(tid.clone())));
+    overlay.add_overlay(&remove_btn);
+    overlay
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn dummy_record(name: &str) -> AttachmentRecord {
-        AttachmentRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            message_id: String::new(),
+    fn dummy_record(name: &str) -> StagedAttachment {
+        StagedAttachment {
             file_name: name.to_string(),
             file_path: format!("/tmp/{name}"),
             mime_type: "text/plain".to_string(),

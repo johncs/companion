@@ -1,8 +1,27 @@
 //! Strongly-typed domain enums shared across `core`, `storage`, `agent`, `inference`, and `ui`.
 
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::gettext;
+
+macro_rules! impl_enum_str_traits {
+    ($ty:ty) => {
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
 
 /// Role of a message in a conversation or inference prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -24,13 +43,24 @@ impl MessageRole {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
+        s.parse().unwrap_or(Self::User)
+    }
+}
+
+impl FromStr for MessageRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "system" => Self::System,
-            "assistant" | "model" => Self::Assistant,
-            _ => Self::User,
+            "system" => Ok(Self::System),
+            "user" => Ok(Self::User),
+            "assistant" | "model" => Ok(Self::Assistant),
+            other => Err(format!("Unknown message role: {other}")),
         }
     }
 }
+
+impl_enum_str_traits!(MessageRole);
 
 /// Access mode granted to a local folder or file in a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -50,16 +80,27 @@ impl FolderPermission {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "read_write" => Self::ReadWrite,
-            _ => Self::Read,
-        }
+        s.parse().unwrap_or(Self::Read)
     }
 
     pub fn allows_write(self) -> bool {
         matches!(self, Self::ReadWrite)
     }
 }
+
+impl FromStr for FolderPermission {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "read" => Ok(Self::Read),
+            "read_write" => Ok(Self::ReadWrite),
+            other => Err(format!("Unknown folder permission: {other}")),
+        }
+    }
+}
+
+impl_enum_str_traits!(FolderPermission);
 
 /// Execution outcome of an agent tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -81,13 +122,24 @@ impl ToolCallStatus {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
+        s.parse().unwrap_or(Self::Error)
+    }
+}
+
+impl FromStr for ToolCallStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "denied" => Self::Denied,
-            "error" => Self::Error,
-            _ => Self::Ok,
+            "ok" => Ok(Self::Ok),
+            "denied" => Ok(Self::Denied),
+            "error" => Ok(Self::Error),
+            other => Err(format!("Unknown tool call status: {other}")),
         }
     }
 }
+
+impl_enum_str_traits!(ToolCallStatus);
 
 /// User permission decision recorded for a tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -109,13 +161,24 @@ impl PermissionDecision {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
+        s.parse().unwrap_or(Self::Deny)
+    }
+}
+
+impl FromStr for PermissionDecision {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "allow_once" => Self::AllowOnce,
-            "allow_chat" => Self::AllowChat,
-            _ => Self::Deny,
+            "deny" => Ok(Self::Deny),
+            "allow_once" => Ok(Self::AllowOnce),
+            "allow_chat" => Ok(Self::AllowChat),
+            other => Err(format!("Unknown permission decision: {other}")),
         }
     }
 }
+
+impl_enum_str_traits!(PermissionDecision);
 
 /// Hardware execution target recorded on generated assistant messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -135,19 +198,31 @@ impl ExecutionDevice {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
+        s.parse().unwrap_or(Self::Cpu)
+    }
+}
+
+impl FromStr for ExecutionDevice {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "gpu" => Self::Gpu,
-            _ => Self::Cpu,
+            "cpu" => Ok(Self::Cpu),
+            "gpu" => Ok(Self::Gpu),
+            other => Err(format!("Unknown execution device: {other}")),
         }
     }
 }
 
+impl_enum_str_traits!(ExecutionDevice);
+
 /// Configured privacy-first web search backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SearchEngine {
     #[default]
+    #[serde(rename = "duckduckgo")]
     DuckDuckGo,
+    #[serde(rename = "searxng")]
     SearXNG,
 }
 
@@ -160,10 +235,7 @@ impl SearchEngine {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "searxng" => Self::SearXNG,
-            _ => Self::DuckDuckGo,
-        }
+        s.parse().unwrap_or(Self::DuckDuckGo)
     }
 
     pub fn label(self) -> String {
@@ -174,17 +246,24 @@ impl SearchEngine {
     }
 }
 
-/// A file or image attached to a chat message.
-#[derive(Debug, Clone)]
-pub struct AttachmentRecord {
-    pub id: String,
-    pub message_id: String,
-    pub file_name: String,
-    pub mime_type: String,
-    pub file_path: String,
-    pub extracted_text: Option<String>,
-    pub byte_size: i64,
+impl FromStr for SearchEngine {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "duckduckgo" => Ok(Self::DuckDuckGo),
+            "searxng" => Ok(Self::SearXNG),
+            other => Err(format!("Unknown search engine: {other}")),
+        }
+    }
 }
+
+impl_enum_str_traits!(SearchEngine);
+
+pub use crate::model_types::{
+    AttachmentRecord, DEFAULT_ASSISTANT_NAME, ModelProviderType, StagedAttachment,
+    compute_running_speed_avg,
+};
 
 #[cfg(test)]
 mod tests {
@@ -251,7 +330,11 @@ mod tests {
             ToolCallStatus::from_str_lossy(" DENIED "),
             ToolCallStatus::Denied
         );
-        assert_eq!(ToolCallStatus::from_str_lossy("weird"), ToolCallStatus::Ok);
+        assert_eq!(
+            ToolCallStatus::from_str_lossy("weird"),
+            ToolCallStatus::Error
+        );
+        assert!("weird".parse::<ToolCallStatus>().is_err());
         assert_eq!(
             PermissionDecision::from_str_lossy(" Allow_Chat "),
             PermissionDecision::AllowChat
@@ -272,6 +355,23 @@ mod tests {
         assert_eq!(
             SearchEngine::from_str_lossy("other"),
             SearchEngine::DuckDuckGo
+        );
+    }
+
+    #[test]
+    fn search_engine_and_enums_serde_roundtrip() {
+        let ddg = serde_json::to_string(&SearchEngine::DuckDuckGo).unwrap();
+        assert_eq!(ddg, "\"duckduckgo\"");
+        assert_eq!(
+            serde_json::from_str::<SearchEngine>(&ddg).unwrap(),
+            SearchEngine::DuckDuckGo
+        );
+
+        let sx = serde_json::to_string(&SearchEngine::SearXNG).unwrap();
+        assert_eq!(sx, "\"searxng\"");
+        assert_eq!(
+            serde_json::from_str::<SearchEngine>(&sx).unwrap(),
+            SearchEngine::SearXNG
         );
     }
 }

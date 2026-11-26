@@ -1,5 +1,7 @@
 //! UI attachment, pause/cancel wiring, and pending download restoration via [`DownloadManager`].
 
+use std::rc::Rc;
+
 use adw::prelude::*;
 use tokio::sync::broadcast;
 
@@ -27,64 +29,95 @@ fn attach_subscription_to_tracker(
     ctx: &HfBrowserContext,
     row_ui: Option<RowDownloadUi>,
 ) {
-    let (row_btn, row_controls) = match row_ui {
+    let (row_btn, row_controls) = bind_row_download_ui(row_ui, &key, &display_name, ctx);
+    let (tracker_controls, finish_tracker) =
+        ctx.tracker
+            .track(&ctx.download_manager, &key, &display_name, &ctx.dialog);
+    let (dialog, refresh_installed, repo_id, row_controls_done) = (
+        ctx.dialog.clone(),
+        ctx.refresh_installed.clone(),
+        key.0,
+        row_controls.clone(),
+    );
+    subscribe_download_lifecycle(
+        initial,
+        rx,
+        tracker_controls,
+        row_controls,
+        Some(&ctx.dialog),
+        move |status| {
+            finish_tracker();
+            if let Some(rc) = &row_controls_done {
+                rc.container.set_visible(false);
+            }
+            if let Some(btn) = &row_btn {
+                btn.set_visible(true);
+                btn.set_sensitive(true);
+            }
+            notify_download_outcome(
+                &dialog,
+                &refresh_installed,
+                &repo_id,
+                &display_name,
+                &status,
+            );
+        },
+    );
+}
+
+fn bind_row_download_ui(
+    row_ui: Option<RowDownloadUi>,
+    key: &DownloadKey,
+    display_name: &str,
+    ctx: &HfBrowserContext,
+) -> (Option<gtk::Button>, Option<DownloadControls>) {
+    match row_ui {
         Some(ui) => {
             ui.controls.bind_download(
                 &ctx.download_manager,
                 key.clone(),
-                display_name.clone(),
+                display_name.to_string(),
                 &ctx.dialog,
             );
             (Some(ui.btn), Some(ui.controls))
         }
         None => (None, None),
-    };
+    }
+}
 
-    let (tracker_controls, finish_tracker) =
-        ctx.tracker
-            .track(&ctx.download_manager, &key, &display_name, &ctx.dialog);
-
-    let dialog = ctx.dialog.clone();
-    let refresh_installed = ctx.refresh_installed.clone();
-    let repo_id = key.0;
-    let row_controls_done = row_controls.clone();
-
-    subscribe_download_lifecycle(initial, rx, tracker_controls, row_controls, move |status| {
-        finish_tracker();
-        if let Some(rc) = &row_controls_done {
-            rc.container.set_visible(false);
+fn notify_download_outcome(
+    dialog: &adw::PreferencesDialog,
+    refresh_installed: &Rc<dyn Fn()>,
+    repo_id: &str,
+    display_name: &str,
+    status: &DownloadStatus,
+) {
+    match status {
+        DownloadStatus::Failed(err) => {
+            dialog.add_toast(adw::Toast::new(&tr_f(
+                "Download failed: {err}",
+                &[("err", err)],
+            )));
+            send_desktop_notification(
+                &format!("download-{repo_id}"),
+                &gettext("Download Failed"),
+                &tr_f("{name}: {err}", &[("name", display_name), ("err", err)]),
+            );
         }
-        if let Some(btn) = &row_btn {
-            btn.set_visible(true);
-            btn.set_sensitive(true);
+        DownloadStatus::Completed => {
+            refresh_installed();
+            dialog.add_toast(adw::Toast::new(&tr_f(
+                "Installed {name}",
+                &[("name", display_name)],
+            )));
+            send_desktop_notification(
+                &format!("download-{repo_id}"),
+                &gettext("Model Downloaded"),
+                &tr_f("{name} is ready to chat.", &[("name", display_name)]),
+            );
         }
-        match &status {
-            DownloadStatus::Failed(err) => {
-                dialog.add_toast(adw::Toast::new(&tr_f(
-                    "Download failed: {err}",
-                    &[("err", err)],
-                )));
-                send_desktop_notification(
-                    &format!("download-{repo_id}"),
-                    &gettext("Download Failed"),
-                    &tr_f("{name}: {err}", &[("name", &display_name), ("err", err)]),
-                );
-            }
-            DownloadStatus::Completed => {
-                refresh_installed();
-                dialog.add_toast(adw::Toast::new(&tr_f(
-                    "Installed {name}",
-                    &[("name", &display_name)],
-                )));
-                send_desktop_notification(
-                    &format!("download-{repo_id}"),
-                    &gettext("Model Downloaded"),
-                    &tr_f("{name} is ready to chat.", &[("name", &display_name)]),
-                );
-            }
-            _ => {}
-        }
-    });
+        _ => {}
+    }
 }
 
 /// Restore any active in-process downloads and any paused downloads from a previous session.
@@ -103,9 +136,11 @@ pub fn restore_pending_downloads(ctx: &HfBrowserContext) {
     }
 
     let mgr_bg = ctx.download_manager.clone();
+    let rt_bg = ctx.services.rt_handle.clone();
     let ctx_ui = ctx.clone();
     spawn_blocking_ui(
-        move || mgr_bg.restore_pending(),
+        &ctx.services.rt_handle,
+        move || rt_bg.block_on(mgr_bg.restore_pending()),
         move |handles| {
             for handle in handles {
                 attach_subscription_to_tracker(

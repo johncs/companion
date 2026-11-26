@@ -22,7 +22,6 @@ pub enum StopOutput {
 /// Incremental stop-sequence filter over streamed UTF-8 token pieces.
 pub struct StopSequenceFilter {
     sequences: Vec<&'static str>,
-    max_hold: usize,
     tail: String,
 }
 
@@ -38,12 +37,11 @@ impl StopSequenceFilter {
         Self::with_sequences(DEFAULT_STOP_SEQUENCES.to_vec())
     }
 
-    /// Create a filter matching the given stop sequences.
+    /// Create a filter matching the given stop sequences (ignoring empty strings).
     pub fn with_sequences(sequences: Vec<&'static str>) -> Self {
-        let max_hold = sequences.iter().map(|s| s.len()).max().unwrap_or(0);
+        let sequences = sequences.into_iter().filter(|s| !s.is_empty()).collect();
         Self {
             sequences,
-            max_hold,
             tail: String::new(),
         }
     }
@@ -66,29 +64,35 @@ impl StopSequenceFilter {
             return StopOutput::Stopped { emit };
         }
 
-        if self.tail.len() > self.max_hold {
-            let mut flush_end = self.tail.len() - self.max_hold;
-            while flush_end > 0 && !self.tail.is_char_boundary(flush_end) {
-                flush_end -= 1;
-            }
-            if flush_end > 0 {
-                let safe: String = self.tail.drain(..flush_end).collect();
-                return StopOutput::Emit(safe);
-            }
+        let flush_end = safe_prefix_overlap(&self.tail, &self.sequences);
+        if flush_end > 0 {
+            let safe: String = self.tail.drain(..flush_end).collect();
+            return StopOutput::Emit(safe);
         }
 
         StopOutput::Emit(String::new())
     }
 
-    /// Flush any remaining buffered text at end-of-stream (trimming trailing whitespace).
+    /// Flush any remaining buffered text at end-of-stream.
     pub fn finish(&mut self) -> String {
-        if self.tail.is_empty() {
-            return String::new();
-        }
-        let trimmed = self.tail.trim_end().to_string();
-        self.tail.clear();
-        trimmed
+        std::mem::take(&mut self.tail)
     }
+}
+
+/// Return how many leading bytes of `buf` cannot possibly be the start of any stop sequence.
+fn safe_prefix_overlap(buf: &str, sequences: &[&str]) -> usize {
+    let mut earliest = buf.len();
+    for &seq in sequences {
+        let max_tail = seq.len().saturating_sub(1).min(buf.len());
+        for tail_len in (1..=max_tail).rev() {
+            let start = buf.len() - tail_len;
+            if buf.is_char_boundary(start) && seq.starts_with(&buf[start..]) {
+                earliest = earliest.min(start);
+                break;
+            }
+        }
+    }
+    earliest
 }
 
 #[cfg(test)]
@@ -141,14 +145,14 @@ mod tests {
     }
 
     #[test]
-    fn finish_trims_trailing_whitespace_without_stop() {
+    fn finish_flushes_buffered_text_without_stop() {
         let mut filter = StopSequenceFilter::new();
         let mut emitted = String::new();
         if let StopOutput::Emit(s) = filter.push("Hi   \n") {
             emitted.push_str(&s);
         }
         emitted.push_str(&filter.finish());
-        assert_eq!(emitted, "Hi");
+        assert_eq!(emitted, "Hi   \n");
     }
 
     #[test]
@@ -188,5 +192,15 @@ mod tests {
             }
         }
         panic!("expected stop sequence");
+    }
+
+    #[test]
+    fn ignores_empty_stop_sequences_and_emits_non_matching_text_immediately() {
+        let mut filter = StopSequenceFilter::with_sequences(vec!["", "<|im_end|>"]);
+        assert_eq!(
+            filter.push("Hello world"),
+            StopOutput::Emit("Hello world".to_string())
+        );
+        assert_eq!(filter.finish(), "");
     }
 }

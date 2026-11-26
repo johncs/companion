@@ -6,7 +6,7 @@ use crate::i18n::{gettext, tr_f};
 use crate::models::format_bytes;
 use crate::models::gguf::format_context_label;
 
-use super::inventory::InstalledModelInfo;
+use crate::models::inventory::InstalledModelInfo;
 
 pub(super) struct ActiveModelViewModel {
     pub(super) file_sub: String,
@@ -24,70 +24,65 @@ pub(super) struct ActiveModelViewModel {
 
 impl ActiveModelViewModel {
     pub(super) fn from_info(info: &InstalledModelInfo) -> Self {
-        let file_name = info
-            .record
-            .file_path
-            .as_deref()
-            .map(|p| {
-                Path::new(p)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(p)
-            })
-            .unwrap_or("—");
-        let file_sub = if info.file_size.is_some() {
-            file_name.to_string()
-        } else {
-            format!("{file_name} ({})", gettext("Missing file"))
-        };
-        let size_sub = info
-            .file_size
-            .map(format_bytes)
-            .unwrap_or_else(|| gettext("Missing file"));
-        let quant_sub = info
-            .record
-            .quantization
-            .as_deref()
-            .unwrap_or("—")
-            .to_string();
-        let ctx_sub = info
-            .gguf
-            .max_context
-            .map(format_context_label)
-            .unwrap_or_else(|| "—".to_string());
-        let speed_sub = if let Some(tps) = info.record.avg_tokens_per_sec {
-            tr_f("{tps} tok/s", &[("tps", &format!("{tps:.1}"))])
-        } else {
-            gettext("Unavailable")
-        };
         let thinking_supported = info.record.supports_thinking || info.gguf.supports_thinking;
-        let thinking_sub = if thinking_supported {
-            gettext("Active")
-        } else {
-            gettext("Unavailable")
-        };
         let (vision_sub, vision_action_label) = resolve_vision_state(info);
         let audio_supported =
             info.gguf.supports_audio || info.mmproj_gguf.as_ref().is_some_and(|m| m.supports_audio);
-        let audio_sub = if audio_supported {
-            gettext("Available (Coming soon)")
-        } else {
-            gettext("Unavailable")
-        };
-
         Self {
-            file_sub,
+            file_sub: resolve_file_sub(info),
             file_tooltip: info.record.file_path.clone(),
-            size_sub,
-            quant_sub,
-            ctx_sub,
-            speed_sub,
+            size_sub: info
+                .file_size
+                .map(format_bytes)
+                .unwrap_or_else(|| gettext("Missing file")),
+            quant_sub: info
+                .record
+                .quantization
+                .as_deref()
+                .unwrap_or("—")
+                .to_string(),
+            ctx_sub: info
+                .gguf
+                .max_context
+                .map(format_context_label)
+                .unwrap_or_else(|| "—".to_string()),
+            speed_sub: resolve_speed_sub(info.record.avg_tokens_per_sec),
             text_sub: gettext("Active"),
-            thinking_sub,
+            thinking_sub: if thinking_supported {
+                gettext("Active")
+            } else {
+                gettext("Unavailable")
+            },
             vision_sub,
             vision_action_label,
-            audio_sub,
+            audio_sub: if audio_supported {
+                gettext("Available (Coming soon)")
+            } else {
+                gettext("Unavailable")
+            },
         }
+    }
+}
+
+fn resolve_file_sub(info: &InstalledModelInfo) -> String {
+    let file_name = info
+        .record
+        .file_path
+        .as_deref()
+        .and_then(|p| Path::new(p).file_name().and_then(|n| n.to_str()))
+        .or(info.record.file_path.as_deref())
+        .unwrap_or("—");
+    if info.file_size.is_some() {
+        file_name.to_string()
+    } else {
+        format!("{file_name} ({})", gettext("Missing file"))
+    }
+}
+
+fn resolve_speed_sub(avg_tps: Option<f64>) -> String {
+    match avg_tps {
+        Some(tps) => tr_f("{tps} tok/s", &[("tps", &format!("{tps:.1}"))]),
+        None => gettext("Unavailable"),
     }
 }
 
@@ -133,7 +128,7 @@ mod tests {
             record: ModelRecord {
                 id: "m1".to_string(),
                 display_name: "Gemma 4".to_string(),
-                provider_type: "llama_cpp".to_string(),
+                provider_type: crate::core::types::ModelProviderType::LlamaCpp,
                 file_path: Some("/tmp/gemma4.gguf".to_string()),
                 mmproj_path: None,
                 hf_repo: Some("org/gemma".to_string()),

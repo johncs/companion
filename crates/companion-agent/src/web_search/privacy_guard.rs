@@ -63,23 +63,40 @@ fn contains_secret_or_email(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     if lower.contains("bearer ")
         || lower.contains("api_key=")
+        || lower.contains("apikey=")
         || lower.contains("token=")
         || lower.contains("password=")
+        || lower.contains("secret=")
+        || lower.contains("auth=")
+        || lower.contains("authorization=")
+        || lower.contains("-----begin ")
     {
         return true;
     }
     for part in text
         .split_whitespace()
-        .flat_map(|tok| tok.split(['&', '=']))
+        .flat_map(|tok| tok.split(['&', '=', '/', '?', '#']))
     {
         let clean = part.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
         if clean.contains('@') && clean.contains('.') && !clean.starts_with('@') {
             return true;
         }
         if clean.starts_with("sk-")
+            || clean.starts_with("sk_live_")
+            || clean.starts_with("rk_live_")
             || clean.starts_with("ghp_")
+            || clean.starts_with("gho_")
+            || clean.starts_with("ghu_")
+            || clean.starts_with("ghs_")
+            || clean.starts_with("ghr_")
+            || clean.starts_with("github_pat_")
+            || clean.starts_with("glpat-")
             || clean.starts_with("AIza")
             || clean.starts_with("xoxb-")
+            || clean.starts_with("xoxp-")
+            || clean.starts_with("xoxa-")
+            || clean.starts_with("AKIA")
+            || clean.starts_with("ASIA")
         {
             return true;
         }
@@ -122,6 +139,10 @@ fn has_local_text_overlap(query: &str, local_texts: &[String]) -> bool {
 pub(super) fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            let is_cgnat = octets[0] == 100 && (octets[1] & 0xc0) == 64;
+            let is_benchmarking = octets[0] == 198 && (octets[1] & 0xfe) == 18;
+            let is_reserved = octets[0] >= 240;
             !v4.is_private()
                 && !v4.is_loopback()
                 && !v4.is_link_local()
@@ -129,16 +150,25 @@ pub(super) fn is_public_ip(ip: IpAddr) -> bool {
                 && !v4.is_documentation()
                 && !v4.is_unspecified()
                 && !v4.is_multicast()
+                && !is_cgnat
+                && !is_benchmarking
+                && !is_reserved
         }
         IpAddr::V6(v6) => {
-            let seg0 = v6.segments()[0];
-            let is_unique_local = (seg0 & 0xfe00) == 0xfc00;
-            let is_link_local = (seg0 & 0xffc0) == 0xfe80;
-            !v6.is_loopback()
-                && !v6.is_unspecified()
-                && !v6.is_multicast()
-                && !is_unique_local
-                && !is_link_local
+            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
+                return false;
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(IpAddr::V4(v4));
+            }
+            let segs = v6.segments();
+            // Reject IPv4-compatible (::/96), NAT64 (64:ff9b::/96), and documentation (2001:db8::/32).
+            let is_ipv4_compat = segs[0..6] == [0; 6];
+            let is_nat64 = segs[0] == 0x0064 && segs[1] == 0xff9b;
+            let is_doc = segs[0] == 0x2001 && segs[1] == 0x0db8;
+            let is_unique_local = (segs[0] & 0xfe00) == 0xfc00;
+            let is_link_local = (segs[0] & 0xffc0) == 0xfe80;
+            !is_ipv4_compat && !is_nat64 && !is_doc && !is_unique_local && !is_link_local
         }
     }
 }
@@ -149,6 +179,9 @@ pub fn validate_fetch_url(raw_url: &str) -> Result<reqwest::Url> {
     let url = reqwest::Url::parse(trimmed).context("Invalid URL")?;
     if url.scheme() != "https" {
         bail!("Only https:// URLs are allowed");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("URLs with embedded credentials are not allowed");
     }
     let host = url
         .host_str()
@@ -172,17 +205,44 @@ pub fn validate_fetch_url(raw_url: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
-/// Inspect a proposed `fetch_url` target for potential leaks in query/path parameters.
+/// Inspect a proposed `fetch_url` target for potential leaks in path, query, or fragment.
 pub fn inspect_fetch_url(raw_url: &str, local_texts: &[String]) -> Vec<String> {
     let mut warnings = Vec::new();
-    if let Ok(url) = reqwest::Url::parse(raw_url.trim()) {
-        if let Some(q) = url.query() {
-            let decoded = percent_decode(q);
-            warnings.extend(inspect_search_query(&decoded, local_texts));
-        }
-    } else {
+    let Ok(url) = reqwest::Url::parse(raw_url.trim()) else {
         warnings.push(gettext("URL could not be parsed; check it carefully."));
+        return warnings;
+    };
+
+    let mut segments = Vec::new();
+    let decoded_path = percent_decode(url.path());
+    if !decoded_path.is_empty() && decoded_path != "/" {
+        segments.push(decoded_path);
     }
+    if let Some(q) = url.query() {
+        segments.push(percent_decode(q));
+    }
+    if let Some(frag) = url.fragment() {
+        segments.push(percent_decode(frag));
+    }
+
+    for seg in segments {
+        let trimmed = seg.trim();
+        if contains_local_path(trimmed) {
+            warnings.push(gettext("Query appears to contain a local file path."));
+        }
+        if contains_secret_or_email(trimmed) {
+            warnings.push(gettext(
+                "Query may contain an email address, API key, or token.",
+            ));
+        }
+        if has_local_text_overlap(trimmed, local_texts) {
+            warnings.push(gettext(
+                "Query matches text from a local file or attachment in this chat.",
+            ));
+        }
+    }
+    warnings.sort();
+    warnings.dedup();
     warnings
 }
 
@@ -246,6 +306,23 @@ mod tests {
         assert!(!is_public_ip("::1".parse().unwrap()));
         assert!(!is_public_ip("fc00::1".parse().unwrap()));
         assert!(!is_public_ip("fe80::1".parse().unwrap()));
+        assert!(!is_public_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("::ffff:169.254.169.254".parse().unwrap()));
+        assert!(!is_public_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("100.64.0.1".parse().unwrap()));
+        assert!(!is_public_ip("64:ff9b::127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("2001:db8::1".parse().unwrap()));
         assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn validate_and_inspect_block_credentials_and_path_fragment_leaks() {
+        assert!(validate_fetch_url("https://user:pass@example.com/").is_err());
+
+        let path_leak = inspect_fetch_url("https://example.com/tokens/ghp_1234567890", &[]);
+        assert!(path_leak.iter().any(|w| w.contains("API key, or token")));
+
+        let frag_leak = inspect_fetch_url("https://example.com/#%2Fhome%2Falice%2Fsecret.txt", &[]);
+        assert!(frag_leak.iter().any(|w| w.contains("local file path")));
     }
 }

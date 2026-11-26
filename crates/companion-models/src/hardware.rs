@@ -39,7 +39,7 @@ pub fn probe_hardware() -> HardwareInfo {
     }
 }
 
-/// Estimate whether a GGUF of `model_bytes` will fit in `total_ram_bytes` (allowing ~1.2x KV-cache overhead).
+/// Estimate whether a GGUF of `model_bytes` will fit in `total_ram_bytes` (allowing ~1.25x KV-cache overhead).
 pub fn assess_model_fit(model_bytes: u64, total_ram_bytes: u64) -> FitStatus {
     if total_ram_bytes == 0 || model_bytes == 0 {
         return FitStatus::Tight;
@@ -57,6 +57,11 @@ pub fn assess_model_fit(model_bytes: u64, total_ram_bytes: u64) -> FitStatus {
 
 fn read_meminfo() -> Option<(u64, u64)> {
     let content = fs::read_to_string("/proc/meminfo").ok()?;
+    Some(parse_meminfo(&content))
+}
+
+/// Parse `MemTotal` and `MemAvailable` (in bytes) from Linux `/proc/meminfo` contents.
+pub fn parse_meminfo(content: &str) -> (u64, u64) {
     let mut total_kb = None;
     let mut avail_kb = None;
 
@@ -71,7 +76,10 @@ fn read_meminfo() -> Option<(u64, u64)> {
         }
     }
 
-    Some((total_kb.unwrap_or(0) * 1024, avail_kb.unwrap_or(0) * 1024))
+    (
+        total_kb.unwrap_or(0).saturating_mul(1024),
+        avail_kb.unwrap_or(0).saturating_mul(1024),
+    )
 }
 
 fn parse_kb(value: &str) -> Option<u64> {
@@ -79,4 +87,25 @@ fn parse_kb(value: &str) -> Option<u64> {
         .split_whitespace()
         .next()
         .and_then(|num| num.parse::<u64>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_meminfo_and_assesses_model_fit() {
+        let sample = "MemTotal:       16384000 kB\nMemFree:         1024000 kB\nMemAvailable:    8192000 kB\n";
+        let (total, avail) = parse_meminfo(sample);
+        assert_eq!(total, 16_384_000 * 1024);
+        assert_eq!(avail, 8_192_000 * 1024);
+        assert_eq!(
+            assess_model_fit(4 * 1024 * 1024 * 1024, total),
+            FitStatus::Comfortable
+        );
+        assert_eq!(
+            assess_model_fit(15 * 1024 * 1024 * 1024, total),
+            FitStatus::TooLarge
+        );
+    }
 }

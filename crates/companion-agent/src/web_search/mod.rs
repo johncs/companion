@@ -15,10 +15,13 @@ use serde::Deserialize;
 
 use html_parse::{extract_readable_text, parse_duckduckgo_html};
 use privacy_guard::{MAX_QUERY_CHARS, is_public_ip};
-use transport::{HttpTransport, ReqwestTransport};
+use transport::ReqwestTransport;
 
 pub use companion_core::types::SearchEngine;
 pub use privacy_guard::{inspect_fetch_url, inspect_search_query, validate_fetch_url};
+#[cfg(test)]
+pub(crate) use transport::HttpResponse;
+pub(crate) use transport::HttpTransport;
 
 pub(super) const MAX_RESULTS: usize = 6;
 const MAX_FETCH_BYTES: usize = 512 * 1024;
@@ -107,22 +110,6 @@ impl WebSearchService {
         })
         .await
     }
-}
-
-/// Run a tracker-free web search on Tokio and return formatted results.
-pub async fn execute_web_search(
-    engine: SearchEngine,
-    searxng_url: Option<&str>,
-    query: &str,
-) -> Result<String> {
-    WebSearchService::new()?
-        .search(engine, searxng_url, query)
-        .await
-}
-
-/// Fetch an approved `https://` web page with pre-hop SSRF redirect checks and bounded download size.
-pub async fn execute_fetch_url(raw_url: &str) -> Result<String> {
-    WebSearchService::new()?.fetch_url(raw_url).await
 }
 
 async fn search_duckduckgo(

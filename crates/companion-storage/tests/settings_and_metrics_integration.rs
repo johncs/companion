@@ -1,16 +1,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use anyhow::Result;
 use companion_core::ThinkingLevel;
 use companion_core::types::{
     ExecutionDevice, FolderPermission, MessageRole, PermissionDecision, ToolCallStatus,
 };
-use companion_storage::{Database, NewMessage, ToolCallRecord};
+use companion_storage::{Database, NewConversation, NewMessage, ToolCallRecord};
 
 #[test]
 fn persists_thinking_level_metrics_and_tool_calls() {
     let db = Database::open_in_memory().expect("open in-memory db");
-    let conv = db.create_conversation("Metrics").unwrap();
+    let conv = db
+        .create_conversation(NewConversation::with_title("Metrics"))
+        .unwrap();
     assert_eq!(conv.thinking_level, ThinkingLevel::Default);
 
     db.set_conversation_thinking_level(&conv.id, ThinkingLevel::High)
@@ -125,11 +126,13 @@ fn render_system_prompt_substitutes_placeholders_and_legacy_prefix() {
 
     let composed = companion_core::prompt::compose_personalized_system_prompt(
         "Reply in Greek.",
-        "Emma",
-        Some("Joe"),
-        companion_core::AssistantPersonality::Friendly,
-        None,
-        None,
+        &companion_core::prompt::PersonalizationProfile {
+            assistant_name: "Emma",
+            user_name: Some("Joe"),
+            personality: companion_core::AssistantPersonality::Friendly,
+            custom_personality: None,
+            user_about: None,
+        },
     );
     assert!(composed.starts_with(companion_core::prompt::CORE_SYSTEM_RULES));
     assert!(composed.contains("Your name is Emma."));
@@ -138,27 +141,15 @@ fn render_system_prompt_substitutes_placeholders_and_legacy_prefix() {
 
     let custom = companion_core::prompt::compose_personalized_system_prompt(
         "",
-        "Emma",
-        Some("Joe"),
-        companion_core::AssistantPersonality::Custom,
-        Some("You are {assistant_name}, a concise Rust mentor for {user_name}."),
-        None,
+        &companion_core::prompt::PersonalizationProfile {
+            assistant_name: "Emma",
+            user_name: Some("Joe"),
+            personality: companion_core::AssistantPersonality::Custom,
+            custom_personality: Some(
+                "You are {assistant_name}, a concise Rust mentor for {user_name}.",
+            ),
+            user_about: None,
+        },
     );
     assert!(custom.contains("You are Emma, a concise Rust mentor for Joe."));
-}
-
-#[test]
-fn with_tx_rolls_back_on_error() {
-    let db = Database::open_in_memory().expect("open in-memory db");
-    let err = db
-        .with_tx(|tx| -> Result<()> {
-            tx.execute(
-                "INSERT INTO app_settings (key, value) VALUES ('tx_test', 'val')",
-                [],
-            )?;
-            anyhow::bail!("abort tx")
-        })
-        .unwrap_err();
-    assert!(err.to_string().contains("abort tx"));
-    assert_eq!(db.get_setting("tx_test").unwrap(), None);
 }

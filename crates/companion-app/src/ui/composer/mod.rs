@@ -3,78 +3,34 @@
 mod actions;
 mod attachments;
 mod input_helpers;
+mod state_sync;
 mod toolbar;
+mod view_model;
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use relm4::prelude::*;
 
 use crate::core::ThinkingLevel;
 use crate::core::prompt::default_system_prompt;
+use crate::core::types::SearchEngine;
 use crate::i18n::{gettext, tr_f};
-use crate::storage::{AttachmentRecord, ConversationFolder, Database, ModelRecord};
-use crate::ui::mention_picker::MentionPicker;
+use crate::services::AppServices;
+use crate::storage::{ConversationFolder, ModelRecord};
+use crate::ui::mention_picker::{MentionEntry, MentionPicker};
 
+pub use actions::{ComposerMsg, ComposerOutput};
 use attachments::{
-    AttachmentQueue, enqueue_dropped_paths, open_attach_file_dialog, rebuild_chips_box,
+    AttachmentQueue, classify_dropped_paths, enqueue_classified_files, open_attach_file_dialog,
+    rebuild_chips_box,
 };
-use input_helpers::{
-    attach_clipboard_paste_handler, attach_dynamic_height_scaler, attach_file_drop_target,
-    attach_key_controller,
-};
-
-#[derive(Debug)]
-pub enum ComposerMsg {
-    SendPressed,
-    StopPressed,
-    AttachPressed,
-    FilesDropped(Vec<PathBuf>),
-    AttachmentLoaded {
-        temp_id: String,
-        result: Result<AttachmentRecord, String>,
-    },
-    RemoveAttachment(String),
-    OpenFolderPermissions,
-    ToggleWebSearch,
-    SetWebSearchEnabled(bool),
-    SetWebSearchGlobalEnabled(bool),
-    SetGrantedFolders(Vec<ConversationFolder>),
-    GrantedFilesLoaded(Vec<String>),
-    OpenChatControls,
-    ControlsApplied {
-        thinking_level: ThinkingLevel,
-        system_prompt: String,
-        context_length: u32,
-    },
-    OpenModelSettings,
-    RefreshModels(Option<String>),
-    SetSystemPrompt(String),
-    SetThinkingLevel(ThinkingLevel),
-    SetAssistantName(String),
-    SetContextUsed(u32),
-    SetGenerating(bool),
-}
-
-#[derive(Debug)]
-pub enum ComposerOutput {
-    Send {
-        text: String,
-        thinking_level: ThinkingLevel,
-        attachments: Vec<AttachmentRecord>,
-    },
-    StopRequested,
-    OpenFolderPermissions,
-    GrantFolder(PathBuf),
-    WebSearchToggled(bool),
-    SystemPromptChanged(String),
-    ThinkingLevelChanged(ThinkingLevel),
-    OpenModelSettings,
-    ShowToast(String),
-}
+use input_helpers::attach_key_controller;
+pub use input_helpers::cleanup_orphaned_clipboard_files;
+use state_sync::build_composer_widgets;
 
 pub struct ComposerModel {
-    db: Database,
+    services: Arc<AppServices>,
     text_view: gtk::TextView,
     chips_box: gtk::Box,
     attach_btn: gtk::Button,
@@ -83,6 +39,7 @@ pub struct ComposerModel {
     controls_btn: gtk::Button,
     web_search_enabled: bool,
     web_search_global_enabled: bool,
+    search_engine: SearchEngine,
     models: Vec<ModelRecord>,
     active_model_id: Option<String>,
     assistant_name: String,
@@ -92,13 +49,14 @@ pub struct ComposerModel {
     context_used_tokens: u32,
     attachments: AttachmentQueue,
     granted_folders: Vec<ConversationFolder>,
-    granted_files: Vec<String>,
+    granted_files: Vec<MentionEntry>,
+    files_seq: u64,
     is_generating: bool,
 }
 
 #[relm4::component(pub)]
 impl SimpleComponent for ComposerModel {
-    type Init = (Database, Option<String>);
+    type Init = (Arc<AppServices>, Option<String>);
     type Input = ComposerMsg;
     type Output = ComposerOutput;
 
@@ -231,25 +189,19 @@ impl SimpleComponent for ComposerModel {
     }
 
     fn init(
-        (db, active_model_id): Self::Init,
+        (services, active_model_id): Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let text_view = gtk::TextView::new();
-        let chips_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let attach_btn = gtk::Button::new();
-        let folders_btn = gtk::Button::new();
-        let globe_btn = gtk::Button::new();
-        let controls_btn = gtk::Button::new();
+        let (text_view, chips_box, attach_btn, folders_btn, globe_btn, controls_btn) =
+            build_composer_widgets();
         let mention_picker = MentionPicker::attach(&text_view);
         attach_key_controller(&text_view, &mention_picker, &sender);
 
-        let assistant_name = db
-            .get_assistant_name()
-            .unwrap_or_else(|_| "Companion".to_string());
-        let web_search_global_enabled = db.get_web_search_global_enabled().unwrap_or(false);
-        let mut model = Self {
-            db,
+        let clipboard_dir = services.paths.clipboard_dir.clone();
+        let rt_handle = services.rt_handle.clone();
+        let model = Self {
+            services,
             text_view: text_view.clone(),
             chips_box: chips_box.clone(),
             attach_btn: attach_btn.clone(),
@@ -257,10 +209,11 @@ impl SimpleComponent for ComposerModel {
             globe_btn: globe_btn.clone(),
             controls_btn: controls_btn.clone(),
             web_search_enabled: false,
-            web_search_global_enabled,
+            web_search_global_enabled: false,
+            search_engine: SearchEngine::default(),
             models: Vec::new(),
             active_model_id,
-            assistant_name,
+            assistant_name: "Companion".to_string(),
             system_prompt: default_system_prompt().to_string(),
             mention_picker: mention_picker.clone(),
             thinking_level: ThinkingLevel::Off,
@@ -268,62 +221,91 @@ impl SimpleComponent for ComposerModel {
             attachments: AttachmentQueue::default(),
             granted_folders: Vec::new(),
             granted_files: Vec::new(),
+            files_seq: 0,
             is_generating: false,
         };
-        model.refresh_folders_button();
-        model.refresh_globe_button();
-        model.refresh_controls_button();
-        model.refresh_attach_button();
+        model.refresh_all_toolbar_buttons(&sender);
 
         let widgets = view_output!();
-        attach_file_drop_target(&widgets.composer_card, &sender);
-
-        let placeholder = widgets.placeholder.clone();
-        let picker_buf = mention_picker;
-        text_view.buffer().connect_changed(move |buf| {
-            placeholder.set_visible(buf.char_count() == 0);
-            picker_buf.update_from_buffer();
-        });
-
-        attach_clipboard_paste_handler(&text_view, &sender);
-        attach_dynamic_height_scaler(&text_view);
-
+        state_sync::wire_composer_text_view(
+            &text_view,
+            &widgets.placeholder,
+            mention_picker,
+            clipboard_dir,
+            rt_handle,
+            &sender,
+        );
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
-            ComposerMsg::SendPressed => self.handle_send_pressed(&sender),
-            ComposerMsg::StopPressed => {
-                let _ = sender.output(ComposerOutput::StopRequested);
+            ComposerMsg::SendPressed
+            | ComposerMsg::StopPressed
+            | ComposerMsg::AttachPressed
+            | ComposerMsg::FilesDropped(_)
+            | ComposerMsg::PathsClassified { .. }
+            | ComposerMsg::AttachmentLoaded { .. }
+            | ComposerMsg::RemoveAttachment(_)
+            | ComposerMsg::OpenFolderPermissions
+            | ComposerMsg::SetGrantedFolders(_)
+            | ComposerMsg::GrantedFilesLoaded { .. } => {
+                self.handle_input_or_attachment_msg(msg, &sender)
             }
-            ComposerMsg::AttachPressed => {
-                open_attach_file_dialog(&self.text_view, &sender);
-            }
+            _ => self.handle_settings_or_state_msg(msg, &sender),
+        }
+    }
+}
+
+impl ComposerModel {
+    fn handle_input_or_attachment_msg(&mut self, msg: ComposerMsg, sender: &ComponentSender<Self>) {
+        match msg {
+            ComposerMsg::SendPressed => self.handle_send_pressed(sender),
+            ComposerMsg::StopPressed => drop(sender.output(ComposerOutput::StopRequested)),
+            ComposerMsg::AttachPressed => open_attach_file_dialog(&self.text_view, sender),
             ComposerMsg::FilesDropped(paths) => {
+                classify_dropped_paths(paths, &self.services.rt_handle, sender);
+            }
+            ComposerMsg::PathsClassified { dirs, files } => {
+                for dir in dirs {
+                    let _ = sender.output(ComposerOutput::GrantFolder(dir));
+                }
                 let has_mmproj = self.has_active_model_mmproj();
-                enqueue_dropped_paths(
+                enqueue_classified_files(
                     &mut self.attachments,
-                    paths,
+                    files,
                     has_mmproj,
                     &self.chips_box,
-                    &sender,
+                    &self.services.rt_handle,
+                    sender,
                 );
             }
             ComposerMsg::AttachmentLoaded { temp_id, result } => {
-                self.handle_attachment_loaded(temp_id, result, &sender);
+                self.handle_attachment_loaded(temp_id, result, sender);
             }
             ComposerMsg::RemoveAttachment(temp_id) => {
                 self.attachments.remove(&temp_id);
-                rebuild_chips_box(&self.chips_box, &self.attachments, &sender);
+                rebuild_chips_box(&self.chips_box, &self.attachments, sender);
             }
             ComposerMsg::OpenFolderPermissions => {
                 let _ = sender.output(ComposerOutput::OpenFolderPermissions);
             }
-            ComposerMsg::ToggleWebSearch => {
-                if !self.web_search_global_enabled {
-                    return;
-                }
+            ComposerMsg::SetGrantedFolders(folders) => {
+                self.granted_folders = folders;
+                self.refresh_folders_button();
+                self.refresh_granted_files(sender);
+            }
+            ComposerMsg::GrantedFilesLoaded { seq, files } if seq == self.files_seq => {
+                self.granted_files = files;
+                self.sync_mention_files();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_settings_or_state_msg(&mut self, msg: ComposerMsg, sender: &ComponentSender<Self>) {
+        match msg {
+            ComposerMsg::ToggleWebSearch if self.web_search_global_enabled => {
                 self.web_search_enabled = !self.web_search_enabled;
                 self.refresh_globe_button();
                 let _ = sender.output(ComposerOutput::WebSearchToggled(self.web_search_enabled));
@@ -334,44 +316,30 @@ impl SimpleComponent for ComposerModel {
             }
             ComposerMsg::SetWebSearchGlobalEnabled(enabled) => {
                 self.web_search_global_enabled = enabled;
+                self.refresh_search_engine(sender);
                 self.refresh_globe_button();
             }
-            ComposerMsg::SetGrantedFolders(folders) => {
-                self.granted_folders = folders;
-                self.refresh_folders_button();
-                self.refresh_granted_files(&sender);
-            }
-            ComposerMsg::GrantedFilesLoaded(files) => {
-                self.granted_files = files;
-                self.sync_mention_files();
-            }
-            ComposerMsg::OpenChatControls => self.open_chat_controls(&sender),
+            ComposerMsg::OpenChatControls => self.open_chat_controls(sender),
             ComposerMsg::ControlsApplied {
                 thinking_level,
                 system_prompt,
                 context_length,
             } => {
-                self.handle_controls_applied(thinking_level, system_prompt, context_length, &sender)
+                self.handle_controls_applied(thinking_level, system_prompt, context_length, sender);
             }
             ComposerMsg::OpenModelSettings => {
-                let _ = sender.output(ComposerOutput::OpenModelSettings);
+                drop(sender.output(ComposerOutput::OpenModelSettings));
             }
-            ComposerMsg::RefreshModels(active_id) => {
-                self.active_model_id = active_id;
-                self.refresh_controls_button();
-                self.refresh_attach_button();
-            }
-            ComposerMsg::SetSystemPrompt(prompt) => self.system_prompt = prompt,
-            ComposerMsg::SetThinkingLevel(level) => self.thinking_level = level,
-            ComposerMsg::SetAssistantName(name) => {
-                self.assistant_name = name;
-                self.refresh_controls_button();
-            }
-            ComposerMsg::SetContextUsed(tokens) => {
-                self.context_used_tokens = tokens;
-                self.refresh_controls_button();
-            }
-            ComposerMsg::SetGenerating(generating) => self.is_generating = generating,
+            ComposerMsg::InitDataLoaded { .. }
+            | ComposerMsg::ModelsMetadataLoaded(_)
+            | ComposerMsg::SearchEngineLoaded(_)
+            | ComposerMsg::RefreshModels(_)
+            | ComposerMsg::SetSystemPrompt(_)
+            | ComposerMsg::SetThinkingLevel(_)
+            | ComposerMsg::SetAssistantName(_)
+            | ComposerMsg::SetContextUsed(_)
+            | ComposerMsg::SetGenerating(_) => self.handle_state_sync_msg(msg, sender),
+            _ => {}
         }
     }
 }

@@ -8,59 +8,52 @@ use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
 use companion_core::ThinkingLevel;
-use companion_core::prompt::default_system_prompt;
 
 use crate::Database;
-use crate::entities::Conversation;
+use crate::entities::{Conversation, NewConversation};
+
+const CONVERSATION_COLUMNS: &str = "id, title, model_id, persona_id, pinned, created_at, updated_at, system_prompt, thinking_level, web_search_enabled";
 
 impl Database {
     /// List all conversations ordered by pinned state and recent activity.
     pub fn list_conversations(&self, limit: usize) -> Result<Vec<Conversation>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, model_id, persona_id, pinned, created_at, updated_at, system_prompt, thinking_level, web_search_enabled
+            let sql = format!(
+                "SELECT {CONVERSATION_COLUMNS}
                  FROM conversations
                  ORDER BY pinned DESC, updated_at DESC
-                 LIMIT ?1",
-            )?;
-            let rows = stmt.query_map(params![limit as i64], map_conversation)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+                 LIMIT ?1"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map(params![limit_i64], map_conversation)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
         })
     }
 
     /// Fetch a single conversation by ID.
     pub fn get_conversation(&self, id: &str) -> Result<Option<Conversation>> {
         self.with_conn(|conn| {
-            conn.query_row(
-                "SELECT id, title, model_id, persona_id, pinned, created_at, updated_at, system_prompt, thinking_level, web_search_enabled
-                 FROM conversations WHERE id = ?1",
-                params![id],
-                map_conversation,
-            )
-            .optional()
-            .map_err(Into::into)
+            let sql = format!("SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE id = ?1");
+            conn.prepare_cached(&sql)?
+                .query_row(params![id], map_conversation)
+                .optional()
+                .map_err(Into::into)
         })
     }
 
-    /// Create a new conversation.
-    pub fn create_conversation(&self, title: &str) -> Result<Conversation> {
+    /// Create a new conversation from explicit caller-resolved settings.
+    pub fn create_conversation(&self, new: NewConversation<'_>) -> Result<Conversation> {
         let now = Utc::now().timestamp_millis();
-        let sys_prompt = default_system_prompt().to_string();
-        let default_thinking = self
-            .get_active_model_id()
-            .ok()
-            .flatten()
-            .and_then(|id| self.get_model(&id).ok().flatten())
-            .map(|m| m.default_thinking_level())
-            .unwrap_or_default();
         let conv = Conversation {
             id: Uuid::new_v4().to_string(),
-            title: title.trim().to_string(),
-            model_id: None,
-            persona_id: None,
-            system_prompt: Some(sys_prompt),
-            thinking_level: default_thinking,
-            web_search_enabled: false,
+            title: new.title.trim().to_string(),
+            model_id: new.model_id.map(str::to_string),
+            persona_id: new.persona_id.map(str::to_string),
+            system_prompt: new.system_prompt,
+            thinking_level: new.thinking_level,
+            web_search_enabled: new.web_search_enabled,
             pinned: false,
             created_at: now,
             updated_at: now,
@@ -144,50 +137,17 @@ impl Database {
     }
 
     /// Duplicate a conversation along with its messages (including metrics), attachments, tool calls, and folders.
-    pub fn duplicate_conversation(&self, source_id: &str) -> Result<Option<Conversation>> {
+    pub fn duplicate_conversation(
+        &self,
+        source_id: &str,
+        new_title: &str,
+    ) -> Result<Option<Conversation>> {
         self.with_tx(|tx| {
-            let Some(source) = tx
-                .query_row(
-                    "SELECT id, title, model_id, persona_id, pinned, created_at, updated_at, system_prompt, thinking_level, web_search_enabled
-                     FROM conversations WHERE id = ?1",
-                    params![source_id],
-                    map_conversation,
-                )
-                .optional()?
-            else {
+            let Some(source) = load_source_conversation(tx, source_id)? else {
                 return Ok(None);
             };
-
-            let now = Utc::now().timestamp_millis();
-            let copy = Conversation {
-                id: Uuid::new_v4().to_string(),
-                title: format!("{} (Copy)", source.title),
-                model_id: source.model_id.clone(),
-                persona_id: source.persona_id.clone(),
-                system_prompt: source.system_prompt.clone(),
-                thinking_level: source.thinking_level,
-                web_search_enabled: source.web_search_enabled,
-                pinned: false,
-                created_at: now,
-                updated_at: now,
-            };
-
-            tx.execute(
-                "INSERT INTO conversations (id, title, model_id, persona_id, pinned, created_at, updated_at, system_prompt, thinking_level, web_search_enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    copy.id,
-                    copy.title,
-                    copy.model_id,
-                    copy.persona_id,
-                    0i64,
-                    copy.created_at,
-                    copy.updated_at,
-                    copy.system_prompt,
-                    copy.thinking_level.as_str(),
-                    copy.web_search_enabled as i64,
-                ],
-            )?;
+            let copy = build_conversation_copy(&source, new_title);
+            insert_conversation_row(tx, &copy)?;
 
             let mut msg_id_map = duplicate::duplicate_messages(tx, source_id, &copy.id)?;
             duplicate::duplicate_attachments(tx, source_id, &mut msg_id_map)?;
@@ -205,7 +165,59 @@ impl Database {
             Ok(())
         })
     }
+}
 
+fn load_source_conversation(
+    tx: &rusqlite::Transaction<'_>,
+    source_id: &str,
+) -> Result<Option<Conversation>> {
+    Ok(tx
+        .query_row(
+            "SELECT id, title, model_id, persona_id, pinned, created_at, updated_at, system_prompt, thinking_level, web_search_enabled
+             FROM conversations WHERE id = ?1",
+            params![source_id],
+            map_conversation,
+        )
+        .optional()?)
+}
+
+fn build_conversation_copy(source: &Conversation, new_title: &str) -> Conversation {
+    let now = Utc::now().timestamp_millis();
+    Conversation {
+        id: Uuid::new_v4().to_string(),
+        title: new_title.trim().to_string(),
+        model_id: source.model_id.clone(),
+        persona_id: source.persona_id.clone(),
+        system_prompt: source.system_prompt.clone(),
+        thinking_level: source.thinking_level,
+        web_search_enabled: source.web_search_enabled,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn insert_conversation_row(tx: &rusqlite::Transaction<'_>, copy: &Conversation) -> Result<()> {
+    tx.execute(
+        "INSERT INTO conversations (id, title, model_id, persona_id, pinned, created_at, updated_at, system_prompt, thinking_level, web_search_enabled)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            copy.id,
+            copy.title,
+            copy.model_id,
+            copy.persona_id,
+            0i64,
+            copy.created_at,
+            copy.updated_at,
+            copy.system_prompt,
+            copy.thinking_level.as_str(),
+            copy.web_search_enabled as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+impl Database {
     /// Search conversations by title or message content via FTS5.
     pub fn search_conversations(&self, query: &str, limit: usize) -> Result<Vec<Conversation>> {
         let trimmed = query.trim();
@@ -213,34 +225,45 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        let like_pattern = format!("%{}%", trimmed.replace('%', "\\%").replace('_', "\\_"));
+        let like_pattern = format!(
+            "%{}%",
+            trimmed
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
         let fts_query = build_fts_query(trimmed);
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
 
         self.with_conn(|conn| {
             if let Some(fts) = fts_query {
-                let mut stmt = conn.prepare(
-                    "SELECT DISTINCT c.id, c.title, c.model_id, c.persona_id, c.pinned, c.created_at, c.updated_at, c.system_prompt, c.thinking_level, c.web_search_enabled
-                     FROM conversations c
-                     WHERE c.title LIKE ?1 ESCAPE '\\'
-                        OR c.id IN (
+                let sql = format!(
+                    "SELECT {CONVERSATION_COLUMNS}
+                     FROM conversations
+                     WHERE title LIKE ?1 ESCAPE '\\'
+                        OR id IN (
                             SELECT conversation_id FROM messages_fts WHERE messages_fts MATCH ?2
                         )
-                     ORDER BY c.pinned DESC, c.updated_at DESC
-                     LIMIT ?3",
-                )?;
+                     ORDER BY pinned DESC, updated_at DESC
+                     LIMIT ?3"
+                );
+                let mut stmt = conn.prepare_cached(&sql)?;
                 let rows =
-                    stmt.query_map(params![like_pattern, fts, limit as i64], map_conversation)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+                    stmt.query_map(params![like_pattern, fts, limit_i64], map_conversation)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(Into::into)
             } else {
-                let mut stmt = conn.prepare(
-                    "SELECT DISTINCT c.id, c.title, c.model_id, c.persona_id, c.pinned, c.created_at, c.updated_at, c.system_prompt, c.thinking_level, c.web_search_enabled
-                     FROM conversations c
-                     WHERE c.title LIKE ?1 ESCAPE '\\'
-                     ORDER BY c.pinned DESC, c.updated_at DESC
-                     LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![like_pattern, limit as i64], map_conversation)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+                let sql = format!(
+                    "SELECT {CONVERSATION_COLUMNS}
+                     FROM conversations
+                     WHERE title LIKE ?1 ESCAPE '\\'
+                     ORDER BY pinned DESC, updated_at DESC
+                     LIMIT ?2"
+                );
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let rows = stmt.query_map(params![like_pattern, limit_i64], map_conversation)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(Into::into)
             }
         })
     }
@@ -266,12 +289,7 @@ fn map_conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
 
 fn build_fts_query(input: &str) -> Option<String> {
     let tokens: Vec<String> = input
-        .split_whitespace()
-        .map(|word| {
-            word.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_')
-                .collect::<String>()
-        })
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
         .map(|t| format!("\"{t}\"*"))
         .collect();
