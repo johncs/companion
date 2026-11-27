@@ -49,14 +49,15 @@ Companion aims to make local AI on Linux **effortless, private, and genuinely na
 
 ## Architecture & Performance
 
-- **Instant Startup & Paginated Storage:** The GTK4/Adwaita window opens immediately while GGUF metadata and syntax sets warm up in the background. SQLite runs in WAL mode with keyset-paginated message loading and FTS5 full-text search.
-- **Virtualized Chat Stream (`gtk::ListView`):** Messages render via `gio::ListStore` + `SignalListItemFactory` with `O(viewport)` widget recycling, throttled token-streaming flushes, and cached Markdown/`syntect` code-block highlighting.
-- **`crates/companion-core`** — Strongly-typed domain enums (`MessageRole`, `ThinkingLevel`, `AssistantPersonality`, `FolderPermission`), `ModelProvider` trait, `ModelParams`, `AppPaths`, algebraic Markdown/`syntect` parser, attachment extraction, and `gettext` helpers (zero GTK, SQLite, or `llama.cpp` dependencies).
-- **`crates/companion-storage`** — WAL-mode SQLite with atomic versioned migrations, FTS5 search, paginated message loading, conversations, granted folders, pending downloads, and models.
-- **`crates/companion-models`** — Hardware RAM/GPU probe, cached GGUF header metadata reader (`GgufMetadataCache`), injectable Hugging Face client (`HfClient`), `ModelRegistryService`, algebraic resumable `DownloadManager`, and friendly model naming.
-- **`crates/companion-agent`** — `AgentRunner`, polymorphic typed `Tool` / `ToolRegistry`, tool-call parser, folder-scoped `PermissionEngine`, path-jailed file/directory tools (`list_files`, `read_file`, `search_files`, `write_file`, `create_directory`, `move_path`, `delete_file`, `delete_directory`), DNS-pinned privacy-first web tools (`web_search`, `fetch_url`), streaming coalescer, and title generation.
-- **`crates/companion-inference`** — Embedded `LlamaCppProvider`, streaming `ThinkStreamParser`, `StopSequenceFilter`, and context-budget prompt templates.
-- **`crates/companion-app`** — Thin Relm4 / GTK4 / `libadwaita` UI shell (100% safe Rust, zero `unsafe`), virtualized `gtk::ListView` chat history with `MessageRowWidget`, Chat Controls, Files & Folders manager, and Settings (`AdwPreferencesDialog`).
+- **Instant Startup & Paginated Storage:** The GTK4/Adwaita window opens immediately while startup sync, GGUF metadata, and syntax sets warm up in the background via a single shared `AppServices` graph. SQLite runs in WAL mode with composite keyset-paginated message loading and FTS5 full-text search.
+- **Virtualized Chat Stream (`gtk::ListView`):** Messages render via `gio::ListStore` + `SignalListItemFactory` with `O(viewport)` widget recycling, throttled token-streaming flushes, KV-cache & `mmproj` reuse across turns, and cached Markdown/`syntect` code-block highlighting.
+- **`crates/companion-core`** — Minimal pure-domain leaf crate: strongly-typed enums (`MessageRole`, `ThinkingLevel`, `AssistantPersonality`, `FolderPermission`, `SearchEngine`), newtype IDs (`ConversationId`, `MessageId`, `ModelId`), `ModelProvider` / `ChatRequest` / `ProviderError`, `ModelParams`, `AppPaths`, pure prompt composition, and `gettext` helpers (zero GTK, SQLite, Markdown, or `llama.cpp` dependencies).
+- **`crates/companion-format`** — Pure-Rust Pango Markdown & `syntect` code-block renderer (`BlockState`, `CodeHighlightCache`) and bounded text/PDF/image attachment extraction (`AttachmentError`).
+- **`crates/companion-storage`** — Pure WAL-mode SQLite CRUD (`StorageError`), atomic versioned migrations with downgrade protection, FTS5 search, composite keyset-paginated message loading, conversations, granted folders, pending downloads, and models.
+- **`crates/companion-models`** — Hardware RAM/GPU probe, cached seek-based GGUF header reader (`GgufMetadataCache`, `GgufError`), injectable Hugging Face client (`HfClient`), `ModelRegistryService`, disk inventory, algebraic single-worker resumable `DownloadManager` (`DownloadError`), and friendly model naming.
+- **`crates/companion-agent`** — `AgentRunner`, session/prompt & page orchestration, MCP-ready polymorphic `Tool` / `ToolRegistry` (`PreparedToolCall`, `ToolMetadata`), tool-call parser, folder-scoped `PermissionEngine`, symlink-safe path-jailed file/directory tools (`list_files`, `read_file`, `search_files`, `write_file`, `create_directory`, `move_path`, `delete_file`, `delete_directory`), DNS-pinned privacy-first web tools (`web_search`, `fetch_url`), streaming coalescer, and title generation.
+- **`crates/companion-inference`** — Embedded `LlamaCppProvider` with KV-cache & `MtmdContext` reuse, UTF-8-safe `TokenStreamPipeline`, `ThinkStreamParser`, `StopSequenceFilter`, and context-budget prompt templates.
+- **`crates/companion-app`** — Thin Relm4 / GTK4 / `libadwaita` UI shell (100% safe Rust, zero `unsafe`, zero `std::fs` in UI code), shared `AppServices`, virtualized `gtk::ListView` chat history with `MessageRowWidget`, pure headless-testable ViewModels, Chat Controls, Files & Folders manager, keyboard shortcuts, accessibility, and Settings (`AdwPreferencesDialog`).
 
 ---
 
@@ -75,9 +76,9 @@ Companion aims to make local AI on Linux **effortless, private, and genuinely na
 cargo test --workspace && cargo run
 
 # Fast headless tests for domain/logic crates (no GTK4 or llama.cpp build)
-cargo test -p companion-core -p companion-storage -p companion-models -p companion-agent
+cargo test -p companion-core -p companion-format -p companion-storage -p companion-models -p companion-agent
 
-# Full verification gate (fmt, clippy -D warnings, tests, <= 400-line budget, zero unsafe, POTFILES, callback-web & test-sleep checks)
+# Full verification gate (fmt, clippy -D warnings, tests, <= 400L/file, <= 50L/fn, zero unsafe, zero non-test #[allow], full-workspace POTFILES, zero callback webs, zero test sleeps, zero UI std::fs, desktop/AppStream validation)
 ./scripts/ci-check.sh
 ```
 

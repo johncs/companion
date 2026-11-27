@@ -7,23 +7,29 @@ on:
 jobs:
   ci-check:
     runs-on: ubuntu-24.04
+    container:
+      image: fedora:latest
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install native dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libsqlite3-dev \
+          dnf install -y \
+            git \
+            gtk4-devel \
+            libadwaita-devel \
+            sqlite-devel \
             cmake \
-            g++ \
+            gcc-c++ \
             clang \
-            pkg-config \
+            pkgconf-pkg-config \
             gettext \
             desktop-file-utils \
-            appstream
+            appstream \
+            python3 \
+            findutils \
+            gawk \
+            grep
+
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
