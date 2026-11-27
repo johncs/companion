@@ -21,6 +21,8 @@ jobs:
             gcc-c++ \
             clang \
             glslc \
+            glslang \
+            spirv-headers-devel \
             vulkan-headers \
             vulkan-loader-devel \
             pkgconf-pkg-config \
