@@ -52,6 +52,13 @@ textview.composer-input text {
     background: transparent;
 }
 
+scrolledwindow.composer-scroller > undershoot.top,
+scrolledwindow.composer-scroller > undershoot.bottom {
+    background: none;
+    box-shadow: none;
+    border: none;
+}
+
 .code-card {
     background-color: var(--view-bg-color);
     border-radius: 14px;

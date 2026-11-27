@@ -76,6 +76,7 @@ impl SimpleComponent for ComposerModel {
                 gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
                     set_spacing: 4,
+                    set_overflow: gtk::Overflow::Hidden,
                     add_css_class: "composer-card",
 
                     #[local_ref]
@@ -93,6 +94,7 @@ impl SimpleComponent for ComposerModel {
                     gtk::Overlay {
                         #[wrap(Some)]
                         set_child = &gtk::ScrolledWindow {
+                            add_css_class: "composer-scroller",
                             set_hscrollbar_policy: gtk::PolicyType::Never,
                             set_vscrollbar_policy: gtk::PolicyType::Automatic,
                             set_propagate_natural_height: true,
@@ -104,7 +106,7 @@ impl SimpleComponent for ComposerModel {
                                 add_css_class: "composer-input",
                                 set_wrap_mode: gtk::WrapMode::WordChar,
                                 set_top_margin: 16,
-                                set_bottom_margin: 4,
+                                set_bottom_margin: 8,
                                 set_left_margin: 16,
                                 set_right_margin: 16,
                                 set_accepts_tab: false,
@@ -127,6 +129,7 @@ impl SimpleComponent for ComposerModel {
                     gtk::Box {
                         set_orientation: gtk::Orientation::Horizontal,
                         set_spacing: 4,
+                        set_margin_top: 6,
                         set_margin_bottom: 8,
                         set_margin_start: 10,
                         set_margin_end: 10,
