@@ -84,13 +84,10 @@ fn present_about_dialog(parent: &adw::ApplicationWindow) {
         .application_name("Companion")
         .application_icon(crate::APP_ID)
         .version(env!("CARGO_PKG_VERSION"))
-        .developer_name("Companion Contributors")
+        .developer_name(gettext("Your Gnome AI assistant"))
         .license_type(gtk::License::Gpl30)
         .website("https://github.com/johncs/companion")
         .issue_url("https://github.com/johncs/companion/issues")
-        .comments(gettext(
-            "Native GNOME AI agent with local GGUF models and folder-scoped tools.",
-        ))
         .build();
     about.present(Some(parent));
 }
