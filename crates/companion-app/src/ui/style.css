@@ -36,9 +36,9 @@ listview.chat-list > row:selected {
 }
 
 .composer-card {
-    background-color: var(--window-bg-color);
+    background-color: var(--sidebar-bg-color);
     border-radius: 22px;
-    border: 1px solid color-mix(in srgb, var(--window-fg-color) 18%, transparent);
+    border: 1px solid color-mix(in srgb, var(--window-fg-color) 8%, transparent);
     transition: border-color 150ms ease;
 }
 
