@@ -120,10 +120,10 @@ impl SimpleComponent for ChatViewModel {
                             set_width_request: 36,
                             set_height_request: 36,
                             set_can_target: false,
-                        }
-                    },
+                        },
 
-                    append = model.composer.widget(),
+                        add_overlay = model.composer.widget(),
+                    },
                 },
 
                 #[name = "drop_overlay"]
@@ -194,6 +194,7 @@ impl SimpleComponent for ChatViewModel {
         );
         let widgets = view_output!();
         connect_scroll_pagination(&scrolled_window, &sender);
+        sync_floating_composer_padding(model.composer.widget(), &scrolled_window);
         attach_drop_overlay(
             &widgets.root_overlay,
             &widgets.drop_overlay,
@@ -257,6 +258,42 @@ fn connect_scroll_pagination(
         if adj.value() < 80.0 && adj.upper() > adj.page_size() {
             sender_clone.input(ChatViewMsg::LoadOlderPage);
         }
+    });
+}
+
+fn sync_floating_composer_padding(
+    composer_widget: &adw::Clamp,
+    scrolled_window: &gtk::ScrolledWindow,
+) {
+    composer_widget.set_halign(gtk::Align::Fill);
+    composer_widget.set_valign(gtk::Align::End);
+    let provider = gtk::CssProvider::new();
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
+    }
+    let last_height = std::cell::Cell::new(0i32);
+    let scroller_weak = scrolled_window.downgrade();
+    composer_widget.add_tick_callback(move |w, _| {
+        let h = w.height();
+        if h > 0 && h != last_height.get() {
+            let was_at_bottom = scroller_weak.upgrade().is_some_and(|s| {
+                let adj = s.vadjustment();
+                adj.upper() - (adj.value() + adj.page_size()) < 48.0
+            });
+            last_height.set(h);
+            provider.load_from_string(&format!(
+                "listview.chat-list {{ padding-bottom: {}px; }}",
+                h + 8
+            ));
+            if was_at_bottom && let Some(s) = scroller_weak.upgrade() {
+                page_loader::scroll_scroller_to_bottom(&s);
+            }
+        }
+        gtk::glib::ControlFlow::Continue
     });
 }
 
