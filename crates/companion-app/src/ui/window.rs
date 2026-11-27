@@ -90,8 +90,8 @@ impl SimpleComponent for MainWindow {
             toast_overlay -> adw::ToastOverlay {
                 #[local_ref]
                 split_view -> adw::NavigationSplitView {
-                    set_min_sidebar_width: 310.0,
-                    set_max_sidebar_width: 310.0,
+                    set_min_sidebar_width: 300.0,
+                    set_max_sidebar_width: 300.0,
                     set_sidebar_width_fraction: 0.35,
 
                     #[wrap(Some)]
