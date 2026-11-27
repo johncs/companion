@@ -307,7 +307,6 @@ fn build_notes_section(
         .left_margin(12)
         .right_margin(12)
         .vexpand(true)
-        .css_classes(["composer-input"])
         .build();
     text_view.buffer().set_text(current_prompt);
 

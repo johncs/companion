@@ -21,7 +21,8 @@ impl MessageInfoViewModel {
         if entry.is_streaming {
             gettext("Generating…")
         } else if let Some(ms) = entry.generation_ms {
-            format!("{:.2} s", (ms as f64) / 1000.0)
+            let secs = format!("{:.2}", (ms as f64) / 1000.0);
+            tr_f("{seconds} s", &[("seconds", &secs)])
         } else {
             "—".to_string()
         }
@@ -81,6 +82,30 @@ impl MessageInfoViewModel {
             return format!("{target} — {err}");
         }
         target
+    }
+
+    pub(super) fn tool_status_label(status: ToolCallStatus) -> String {
+        match status {
+            ToolCallStatus::Ok => gettext("OK"),
+            ToolCallStatus::Denied => gettext("Denied"),
+            ToolCallStatus::Error => gettext("Error"),
+        }
+    }
+
+    pub(super) fn tool_display_name(tool_name: &str) -> String {
+        match tool_name {
+            "read_file" => gettext("Read File"),
+            "list_directory" => gettext("List Directory"),
+            "search_files" => gettext("Search Files"),
+            "write_file" => gettext("Write File"),
+            "edit_file" => gettext("Edit File"),
+            "create_directory" => gettext("Create Directory"),
+            "delete_file" => gettext("Delete File"),
+            "delete_directory" => gettext("Delete Directory"),
+            "web_search" => gettext("Web Search"),
+            "fetch_url" => gettext("Fetch URL"),
+            other => other.to_string(),
+        }
     }
 }
 

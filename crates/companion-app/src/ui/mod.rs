@@ -21,6 +21,7 @@ pub mod sidebar;
 pub mod sidebar_rows;
 pub mod widgets;
 pub mod window;
+mod window_actions;
 mod window_settings;
 
 use gtk::gdk;

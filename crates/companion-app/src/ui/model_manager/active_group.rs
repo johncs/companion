@@ -104,6 +104,7 @@ fn build_active_detail_rows(
     let thinking_row = build_property_row(&gettext("Thinking"));
     let (vision_row, vision_controls, vision_action_btn) = build_vision_detail_row();
     let audio_row = build_property_row(&gettext("Audio"));
+    audio_row.set_visible(cfg!(feature = "experimental-audio"));
 
     for row in [
         &file_row,

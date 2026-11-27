@@ -196,7 +196,6 @@ fn build_thinking_section() -> (gtk::Box, gtk::TextBuffer) {
         .bottom_margin(14)
         .left_margin(16)
         .right_margin(16)
-        .css_classes(["composer-input"])
         .build();
     let buf = text_view.buffer();
     let buf_copy = buf.clone();
@@ -362,7 +361,9 @@ fn sync_thinking_buffer(
 fn build_tool_call_row(tc: &crate::storage::ToolCallRecord) -> ToolRowWidgets {
     let status_lbl = gtk::Label::builder().valign(gtk::Align::Center).build();
     let row = adw::ActionRow::builder()
-        .title(glib::markup_escape_text(&tc.tool_name))
+        .title(glib::markup_escape_text(
+            &MessageInfoViewModel::tool_display_name(&tc.tool_name),
+        ))
         .subtitle_lines(1)
         .build();
     row.add_suffix(&status_lbl);
@@ -377,10 +378,13 @@ fn update_tool_call_row(w: &ToolRowWidgets, tc: &crate::storage::ToolCallRecord)
         ToolCallStatus::Denied => "warning",
         ToolCallStatus::Ok => "dim-label",
     };
-    w.row.set_title(&glib::markup_escape_text(&tc.tool_name));
+    w.row.set_title(&glib::markup_escape_text(
+        &MessageInfoViewModel::tool_display_name(&tc.tool_name),
+    ));
     w.row.set_subtitle(&glib::markup_escape_text(
         &MessageInfoViewModel::summarize_tool_call(tc),
     ));
-    w.status_lbl.set_label(tc.status.as_str());
+    w.status_lbl
+        .set_label(&MessageInfoViewModel::tool_status_label(tc.status));
     w.status_lbl.set_css_classes(&[status_class]);
 }

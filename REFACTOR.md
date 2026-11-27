@@ -426,48 +426,58 @@
 
 **Goal:** Fix broken translation extraction and Meson packaging, add native GNOME accessibility and keyboard navigation, optimize multi-turn `llama.cpp` latency, and lock every quality invariant into CI permanently.
 
-### 9.1 Localization & GNOME Packaging (`po/`, `data/`, `src/meson.build`)
-- [ ] **Fix `xgettext` extraction:**
+### 9.1 Localization Extraction & `POTFILES.in` (`po/`, `companion-app`, `companion-agent`)
+- [x] **Fix `xgettext` extraction:**
   - Add `args: ['--keyword=tr_f:1']` to `po/meson.build` so every `tr_f(...)` string is extracted.
   - Refactor `preferences/tools_group.rs` (now driven from `ToolRegistry` metadata) to use extractable `gettext("...")` string literals.
   - Localize raw strings in `message_dialogs/info_dialog.rs` (`"s"`, `tc.status.as_str()`, raw `tc.tool_name`), `widgets.rs` (`"FILE"`), `composer/attachments.rs` (`"file"`), `composer/toolbar.rs` bullet layout, and `companion-agent` error/status messages.
-- [ ] **Fix `po/POTFILES.in` drift:**
+- [x] **Fix `po/POTFILES.in` drift:**
   - Remove the 6 stale entries (`icons.rs`, `agent/src/lib.rs`, `runner/mod.rs`, `web_search/mod.rs`, `core/src/attachments.rs`, `storage/src/attachments.rs`).
-  - Add the 4 missing `companion-agent` files (`runner/step.rs`, `title_gen.rs`, `tool.rs`, `tools/web_tools.rs`) plus any newly split files.
-- [ ] **Fix Meson, Desktop & AppStream metadata:**
+  - Add the missing `companion-agent` files (`runner/step.rs`, `title_gen.rs`, `tool.rs`, `tools/web_tools.rs`, plus any other crates/files using `gettext`/`tr_f`).
+
+### 9.2 Meson, Desktop, AppStream & Icon Packaging (`data/`, `src/meson.build`)
+- [x] **Fix Meson, Desktop & AppStream metadata:**
   - Switch `data/meson.build:4–21` from `configure_file` to `i18n.merge_file` so `.desktop` and `.metainfo.xml` are actually translated.
   - Add `desktop-file-validate` and `appstreamcli validate --no-net` Meson tests in `data/meson.build`.
   - Add `SingleMainWindow=true` to `data/io.github.companion.Companion.desktop.in` and replace stale `"Projects"` copy with `"Files & Folders"`.
   - Update `data/io.github.companion.Companion.metainfo.xml.in`: current release description, `<translation type="gettext">companion</translation>`, `<supports>`, `<requires><display_length compare="ge">360</display_length></requires>`, `<branding>`, consistent repository/developer IDs, and `bugtracker`/`vcs-browser` URLs.
   - Fix `src/meson.build` to pass `-p companion-app` and support `--offline` Flatpak builds; normalize `io.github.companion.Companion-symbolic.svg` dimensions (`width="16" height="16"`).
 
-### 9.2 Native GNOME Accessibility, Keyboard Shortcuts & CSS Polish
-- [ ] **Keyboard accelerators & HIG polish (`window.rs`, `main.rs`):**
+### 9.3 Keyboard Shortcuts, `AdwAboutDialog` & Placeholder Hiding (`companion-app`)
+- [x] **Keyboard accelerators & HIG polish (`window.rs`, `main.rs`):**
   - Wire standard GNOME `gio::SimpleAction`s and accelerators: `Ctrl+N` (New Chat), `Ctrl+F` (Search Sidebar), `Ctrl+,` (Preferences), `Esc` (Stop Generation), `Ctrl+?` (Keyboard Shortcuts dialog), plus `AdwAboutDialog` in the primary menu.
   - Hide unfinished placeholder sections in Settings (`preferences/mod.rs:240–246` MCP placeholder, `view_model.rs:73` `"Coming soon"` audio) behind feature flags until implemented.
-  - Add `adw::Spinner` / `gtk::Spinner` to `hf_browser/mod.rs:140–144`, inline Retry button in `hf_browser/repo_rows.rs:71–74`, and replace pointer-centric `"Click +"` text in `folder_permissions_dialog.rs:105, 113`.
-- [ ] **GTK4 Accessibility (a11y):**
+
+### 9.4 `hf_browser` UX & GTK4 Accessibility (`companion-app`)
+- [x] **Loading, Retry & pointer-neutral copy:**
+  - Add `adw::Spinner` / `gtk::Spinner` to `hf_browser/mod.rs:140–144`, inline Retry button in `hf_browser/repo_rows.rs:71–74`, and replace pointer-centric `"Click +"` text in `folder_permissions_dialog` (`rows.rs` / `mod.rs`).
+- [x] **GTK4 Accessibility (a11y):**
   - Add `AccessibleRelation::LabelledBy` / `AccessibleProperty::Label` on the composer `gtk::TextView` and key icon controls.
   - Make document tiles (`widgets.rs:191–226`) keyboard-focusable with accessible names, remove the `grab_focus()` ping-pong hack in `mention_picker.rs:223–224`, replace fixed `width_chars` in `preferences/tools_group.rs:183–184` with `gtk::SizeGroup`, and restore visible focus rings on `listview.chat-list > row`.
-- [ ] **Modernize `crates/companion-app/src/ui/style.css`:**
+
+### 9.5 CSS Modernization (`crates/companion-app/src/ui/style.css`)
+- [x] **Modernize `crates/companion-app/src/ui/style.css`:**
   - Remove the 4 dead CSS rules (`style.css:62–84`: `.thinking-expander`, `dropdown.pill-dropdown > button`, `popover.model-popover contents`, `button.popover-item`).
   - Scope `list.navigation-sidebar` (`style.css:184–195`) to `list.companion-sidebar` so it doesn't bleed into `MentionPicker`; remove misleading `"composer-input"` class from dialog `TextView`s.
   - Migrate deprecated `@define-color` variables (`@window_fg_color`, etc.) to modern Libadwaita CSS custom properties (`var(--window-fg-color)`, `var(--border-color)`, `color-mix(...)`) and verify Light, Dark, and High Contrast themes.
 
-### 9.3 Multi-Turn Inference Caching (`companion-inference`)
-- [ ] **KV-cache prefix reuse & `MtmdContext` caching:**
-  - Retain the active `LlamaContext` (and its cached prompt token vector) inside `LlamaCppProvider` when model path and `n_ctx` are unchanged, trimming only the diverged KV suffix (`clear_kv_cache_seq`) instead of re-evaluating the entire conversation + tool definitions from `pos = 0` on every agent step.
+### 9.6 `MtmdContext` Caching (`companion-inference`)
+- [x] **Cache `MtmdContext` alongside active `LlamaModel`:**
   - Cache the loaded `MtmdContext` alongside the active `LlamaModel` so `mmproj` weights (500 MB–1.7 GB) aren't reloaded from disk on every multimodal turn.
 
-### 9.4 Permanent CI Guardrails (`scripts/ci-check.sh` & `.github/workflows/ci.yml`)
-- [ ] Expand `scripts/ci-check.sh` to enforce:
+### 9.7 KV-Cache Prefix Reuse (`companion-inference`)
+- [x] **KV-cache prefix reuse across turns:**
+  - Retain the active `LlamaContext` (and its cached prompt token vector) inside `LlamaCppProvider` when model path and `n_ctx` are unchanged, trimming only the diverged KV suffix (`clear_kv_cache_seq`) instead of re-evaluating the entire conversation + tool definitions from `pos = 0` on every agent step.
+
+### 9.8 Permanent CI Guardrails (`scripts/ci-check.sh` & `.github/workflows/ci.yml`)
+- [x] Expand `scripts/ci-check.sh` to enforce:
   1. **Zero non-test `#[allow(...)]`** across `crates/`.
   2. **Full-workspace `po/POTFILES.in` sync** — scan *all* crates for `gettext`/`ngettext`/`tr_f` AND fail on stale entries with zero matches.
   3. **Non-test function length `<= 50` lines** across `crates/`.
   4. **Zero `std::fs` calls in `crates/companion-app/src/ui/`** (outside `#[cfg(test)]`).
   5. **Desktop & AppStream validation** (`desktop-file-validate`, `appstreamcli validate --no-net`) when available.
-- [ ] Add `.github/workflows/ci.yml` running `./scripts/ci-check.sh` on every push and pull request.
-- [ ] Run full `./scripts/ci-check.sh` and Meson build verification end-to-end.
+- [x] Add `.github/workflows/ci.yml` running `./scripts/ci-check.sh` on every push and pull request.
+- [x] Run full `./scripts/ci-check.sh` and Meson build verification end-to-end.
 
 ---
 

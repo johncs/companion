@@ -328,8 +328,9 @@ impl AgentRunner {
             }
             Ok(Err(err)) => {
                 tracing::error!("Failed to persist granted folder: {err}");
-                let _ = tx.send(AgentEvent::Error(format!(
-                    "Failed to save folder access: {err}"
+                let _ = tx.send(AgentEvent::Error(companion_core::i18n::tr_f(
+                    "Failed to save folder access: {err}",
+                    &[("err", &err.to_string())],
                 )));
             }
             Err(err) => {

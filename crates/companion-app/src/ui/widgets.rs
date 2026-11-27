@@ -122,10 +122,15 @@ pub fn build_document_tile(file_name: &str, mime_type: &str, size: i32) -> gtk::
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
         .spacing(4)
+        .focusable(true)
         .tooltip_text(file_name)
         .css_classes(["doc-tile"])
         .build();
     tile.set_size_request(size, size);
+    tile.update_property(&[gtk::accessible::Property::Label(&crate::i18n::tr_f(
+        "Document: {name}",
+        &[("name", file_name)],
+    ))]);
 
     let icon_name = if mime_type == "application/pdf" {
         "x-office-document-symbolic"
@@ -142,7 +147,7 @@ pub fn build_document_tile(file_name: &str, mime_type: &str, size: i32) -> gtk::
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_uppercase())
-        .unwrap_or_else(|| "FILE".to_string());
+        .unwrap_or_else(|| gettext("FILE"));
     let ext_label = gtk::Label::builder()
         .label(&ext)
         .css_classes(["caption-heading", "dim-label"])

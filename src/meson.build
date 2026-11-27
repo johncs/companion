@@ -3,8 +3,13 @@ cargo = find_program('cargo', required: true)
 cargo_options = [
   '--manifest-path', meson.project_source_root() / 'Cargo.toml',
   '--target-dir', meson.project_build_root() / 'target',
+  '-p', 'companion-app',
   '--release',
 ]
+
+if get_option('offline')
+  cargo_options += ['--offline']
+endif
 
 localedir = get_option('prefix') / get_option('localedir')
 

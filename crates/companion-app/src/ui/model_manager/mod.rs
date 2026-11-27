@@ -65,10 +65,7 @@ pub fn build_models_page(
         .icon_name(icons::MODEL)
         .build();
     let state = build_manager_state(dialog, services, hw, active_model_id, on_active_changed);
-    let (refresh_tx, refresh_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let refresh_installed: Rc<dyn Fn()> = Rc::new(move || {
-        let _ = refresh_tx.send(());
-    });
+    let (refresh_rx, refresh_installed) = make_refresh_channel();
     let get_active_record = make_active_record_getter(&state);
 
     let (active_group, active_model_row, active_rows, vision_controls) =
@@ -104,6 +101,14 @@ pub fn build_models_page(
         get_active_record: &get_active_record,
     });
     page
+}
+
+fn make_refresh_channel() -> (tokio::sync::mpsc::UnboundedReceiver<()>, Rc<dyn Fn()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let trigger: Rc<dyn Fn()> = Rc::new(move || {
+        let _ = tx.send(());
+    });
+    (rx, trigger)
 }
 
 fn setup_active_models_section(

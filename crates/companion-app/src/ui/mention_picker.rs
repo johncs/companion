@@ -237,8 +237,6 @@ impl MentionPicker {
         let next = (current + delta).clamp(0, count - 1);
         if let Some(row) = self.list_box.row_at_index(next) {
             self.list_box.select_row(Some(&row));
-            row.grab_focus();
-            self.text_view.grab_focus();
         }
     }
 

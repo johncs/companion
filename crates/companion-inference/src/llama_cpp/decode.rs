@@ -86,6 +86,9 @@ impl<'a> InferenceRun<'a> {
         batch.add(token, eval.pos, &[0], true)?;
         eval.pos = eval.pos.saturating_add(1);
         eval.ctx.decode(batch).context("Token decode failed")?;
+        if !eval.evaluated_tokens.is_empty() {
+            eval.evaluated_tokens.push(token);
+        }
         if state.completion_tokens.is_multiple_of(16) {
             std::thread::yield_now();
         }

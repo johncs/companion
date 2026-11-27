@@ -32,7 +32,6 @@ pub fn present_edit_message_dialog(
         .bottom_margin(14)
         .left_margin(16)
         .right_margin(16)
-        .css_classes(["composer-input"])
         .build();
     text_view.buffer().set_text(initial_content);
 

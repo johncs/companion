@@ -10,13 +10,15 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::LlamaModel;
-use llama_cpp_2::mtmd::{MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputText};
+use llama_cpp_2::mtmd::{MtmdBitmap, MtmdInputText};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 use tokio::sync::mpsc;
 
 use companion_core::provider::{ChatEvent, ChatTurn, InferenceParams};
 
 use super::decode::emit_stop_notice;
+use super::kv_cache::{restore_kv_prefix, save_kv_prefix};
 use super::prompt::{format_chat_prompt, trim_turns_to_budget};
 use super::{LlamaCppProvider, get_backend};
 
@@ -34,9 +36,11 @@ pub(super) struct PromptEvalResult<'a> {
     pub(super) pos: i32,
     pub(super) prompt_tokens: u32,
     pub(super) ctx_size: u32,
+    pub(super) evaluated_tokens: Vec<LlamaToken>,
 }
 
 pub(super) struct InferenceRun<'a> {
+    pub(super) provider: &'a LlamaCppProvider,
     pub(super) backend: &'a LlamaBackend,
     pub(super) model: &'a LlamaModel,
     pub(super) params: &'a InferenceParams,
@@ -75,6 +79,7 @@ pub(super) fn run_inference_blocking(
     let (ui_friendly_threads, n_batch) = compute_thread_config(effective_gpu_layers);
     let mut batch = LlamaBatch::new(n_batch, 1);
     let run = InferenceRun {
+        provider,
         backend: &backend,
         model: &model,
         params,
@@ -84,13 +89,24 @@ pub(super) fn run_inference_blocking(
         tx,
     };
     let image_refs: Vec<&str> = image_paths.iter().map(String::as_str).collect();
-    let Some(mut eval) =
-        run.eval_prompt(active_mmproj.as_deref(), &image_refs, prompt, &mut batch)?
+    let Some(eval) = run.eval_prompt(active_mmproj.as_deref(), &image_refs, prompt, &mut batch)?
     else {
         return Ok(());
     };
+    finish_inference_run(provider, eval, &run, &mut batch, initial_close_tag, tx)
+}
+
+fn finish_inference_run<'a>(
+    provider: &LlamaCppProvider,
+    mut eval: PromptEvalResult<'a>,
+    run: &InferenceRun<'a>,
+    batch: &mut LlamaBatch,
+    initial_close_tag: Option<&'static str>,
+    tx: &mpsc::UnboundedSender<ChatEvent>,
+) -> Result<()> {
     let (stop_reason, completion_tokens, decode_ms) =
-        run.run_decode_loop(&mut eval, &mut batch, initial_close_tag)?;
+        run.run_decode_loop(&mut eval, batch, initial_close_tag)?;
+    save_kv_prefix(provider, &eval.ctx, eval.ctx_size, eval.evaluated_tokens);
     emit_stop_notice(stop_reason, tx);
     let _ = tx.send(ChatEvent::Usage {
         prompt_tokens: eval.prompt_tokens,
@@ -165,19 +181,18 @@ impl<'a> InferenceRun<'a> {
         if self.cancel_flag.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let mut mtmd_ctx = self.init_mtmd_context(mmproj_path)?;
-        let mut bitmaps = Vec::with_capacity(image_paths.len());
-        for img_path in image_paths {
-            if self.cancel_flag.load(Ordering::Relaxed) {
-                return Ok(None);
-            }
-            let bmp = MtmdBitmap::from_file(&mtmd_ctx, img_path, false)
-                .map_err(|e| anyhow!("Failed to decode image {img_path}: {e}"))?;
-            bitmaps.push(bmp);
-        }
-        if self.cancel_flag.load(Ordering::Relaxed) {
+        let mtmd_arc = self.provider.get_or_load_mmproj(
+            self.model,
+            mmproj_path,
+            self.params.n_gpu_layers > 0,
+            self.ui_friendly_threads,
+        )?;
+        let mut mtmd_ctx = mtmd_arc
+            .lock()
+            .map_err(|_| anyhow!("Vision projector state lock poisoned"))?;
+        let Some(bitmaps) = self.decode_mtmd_bitmaps(&mtmd_ctx, image_paths)? else {
             return Ok(None);
-        }
+        };
         let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
         let chunks = mtmd_ctx
             .tokenize(
@@ -204,29 +219,28 @@ impl<'a> InferenceRun<'a> {
             pos: new_pos,
             prompt_tokens: u32::try_from(new_pos.max(0)).unwrap_or(0),
             ctx_size,
+            evaluated_tokens: Vec::new(),
         }))
     }
 
-    fn init_mtmd_context(&self, mmproj_path: &str) -> Result<MtmdContext> {
-        let gpu_params = MtmdContextParams {
-            use_gpu: self.params.n_gpu_layers > 0,
-            n_threads: self.ui_friendly_threads,
-            ..MtmdContextParams::default()
-        };
-        MtmdContext::init_from_file(mmproj_path, self.model, &gpu_params)
-            .or_else(|_| {
-                let cpu_params = MtmdContextParams {
-                    use_gpu: false,
-                    n_threads: self.ui_friendly_threads,
-                    ..MtmdContextParams::default()
-                };
-                MtmdContext::init_from_file(mmproj_path, self.model, &cpu_params)
-            })
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to load vision projector ({mmproj_path}): {e}. Ensure it matches this model in Settings → Models."
-                )
-            })
+    fn decode_mtmd_bitmaps(
+        &self,
+        mtmd_ctx: &llama_cpp_2::mtmd::MtmdContext,
+        image_paths: &[&str],
+    ) -> Result<Option<Vec<MtmdBitmap>>> {
+        let mut bitmaps = Vec::with_capacity(image_paths.len());
+        for img_path in image_paths {
+            if self.cancel_flag.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            let bmp = MtmdBitmap::from_file(mtmd_ctx, img_path, false)
+                .map_err(|e| anyhow!("Failed to decode image {img_path}: {e}"))?;
+            bitmaps.push(bmp);
+        }
+        if self.cancel_flag.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        Ok(Some(bitmaps))
     }
 
     fn eval_text_prompt(
@@ -243,9 +257,11 @@ impl<'a> InferenceRun<'a> {
         let ctx_cap = MAX_AUTO_CTX_TOKENS.max(self.params.n_ctx);
         let ctx_size = self.params.n_ctx.max(needed).min(ctx_cap);
         let mut ctx = self.new_context(ctx_size)?;
+        let prefix_len =
+            restore_kv_prefix(&mut ctx, self.provider.take_kv_cache(), ctx_size, &tokens);
 
-        let mut pos = 0i32;
-        for chunk in tokens.chunks(self.n_batch) {
+        let mut pos = i32::try_from(prefix_len).unwrap_or(0);
+        for chunk in tokens[prefix_len..].chunks(self.n_batch) {
             if self.cancel_flag.load(Ordering::Relaxed) {
                 return Ok(None);
             }
@@ -264,6 +280,7 @@ impl<'a> InferenceRun<'a> {
             pos,
             prompt_tokens: tok_len,
             ctx_size,
+            evaluated_tokens: tokens,
         }))
     }
 

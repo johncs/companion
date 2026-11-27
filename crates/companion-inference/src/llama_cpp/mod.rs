@@ -1,6 +1,7 @@
 //! Embedded `llama.cpp` GGUF inference backend with Vulkan + CPU fallback.
 
 mod decode;
+mod kv_cache;
 mod prompt;
 mod runner;
 
@@ -12,6 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::mtmd::{MtmdContext, MtmdContextParams};
 use tokio::sync::mpsc;
 
 use companion_core::provider::{ChatEvent, ChatRequest, ModelProvider, ProviderError};
@@ -37,10 +39,18 @@ pub(super) fn get_backend() -> Result<Arc<LlamaBackend>> {
     Ok(arc)
 }
 
-struct LoadedModel {
+struct LoadedMmproj {
+    path: String,
+    use_gpu: bool,
+    ctx: Arc<Mutex<MtmdContext>>,
+}
+
+pub(super) struct LoadedModel {
     path: String,
     n_gpu_layers: u32,
     model: Arc<LlamaModel>,
+    mmproj: Option<LoadedMmproj>,
+    pub(super) kv_cache: Option<kv_cache::KvPrefixCache>,
 }
 
 /// Embedded `llama.cpp` provider that caches the active loaded GGUF in memory.
@@ -48,7 +58,7 @@ struct LoadedModel {
 #[derive(Clone)]
 pub struct LlamaCppProvider {
     handle: tokio::runtime::Handle,
-    loaded: Arc<Mutex<Option<LoadedModel>>>,
+    pub(super) loaded: Arc<Mutex<Option<LoadedModel>>>,
     inference_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -110,10 +120,88 @@ impl LlamaCppProvider {
             path: model_path.to_string(),
             n_gpu_layers: effective_gpu_layers,
             model: arc.clone(),
+            mmproj: None,
+            kv_cache: None,
         });
 
         Ok((arc, effective_gpu_layers))
     }
+
+    pub(super) fn get_or_load_mmproj(
+        &self,
+        model: &LlamaModel,
+        mmproj_path: &str,
+        use_gpu: bool,
+        n_threads: i32,
+    ) -> Result<Arc<Mutex<MtmdContext>>> {
+        {
+            let mut guard = self
+                .loaded
+                .lock()
+                .map_err(|_| anyhow!("Loaded model state lock poisoned"))?;
+            if let Some(loaded) = guard.as_mut() {
+                if let Some(mm) = loaded.mmproj.as_ref()
+                    && mmproj_cache_matches(&mm.path, mm.use_gpu, mmproj_path, use_gpu)
+                {
+                    return Ok(mm.ctx.clone());
+                }
+                loaded.mmproj = None;
+            }
+        }
+        let (mtmd, effective_gpu) =
+            load_mmproj_with_fallback(model, mmproj_path, use_gpu, n_threads)?;
+        let arc = Arc::new(Mutex::new(mtmd));
+        let mut guard = self
+            .loaded
+            .lock()
+            .map_err(|_| anyhow!("Loaded model state lock poisoned"))?;
+        if let Some(loaded) = guard.as_mut() {
+            loaded.mmproj = Some(LoadedMmproj {
+                path: mmproj_path.to_string(),
+                use_gpu: effective_gpu,
+                ctx: arc.clone(),
+            });
+        }
+        Ok(arc)
+    }
+}
+
+pub(super) fn mmproj_cache_matches(
+    cached_path: &str,
+    cached_gpu: bool,
+    req_path: &str,
+    req_gpu: bool,
+) -> bool {
+    cached_path == req_path && (cached_gpu == req_gpu || (req_gpu && !cached_gpu))
+}
+
+fn load_mmproj_with_fallback(
+    model: &LlamaModel,
+    mmproj_path: &str,
+    use_gpu: bool,
+    n_threads: i32,
+) -> Result<(MtmdContext, bool)> {
+    if use_gpu {
+        let gpu_params = MtmdContextParams {
+            use_gpu: true,
+            n_threads,
+            ..MtmdContextParams::default()
+        };
+        if let Ok(ctx) = MtmdContext::init_from_file(mmproj_path, model, &gpu_params) {
+            return Ok((ctx, true));
+        }
+    }
+    let cpu_params = MtmdContextParams {
+        use_gpu: false,
+        n_threads,
+        ..MtmdContextParams::default()
+    };
+    let ctx = MtmdContext::init_from_file(mmproj_path, model, &cpu_params).map_err(|e| {
+        anyhow!(
+            "Failed to load vision projector ({mmproj_path}): {e}. Ensure it matches this model in Settings → Models."
+        )
+    })?;
+    Ok((ctx, false))
 }
 
 fn load_model_with_fallback(
@@ -285,5 +373,28 @@ mod tests {
             }
         }
         assert!(saw_error && saw_done);
+    }
+
+    #[test]
+    fn mmproj_cache_key_matches_and_respects_cpu_fallback() {
+        assert!(mmproj_cache_matches("/a/mm.gguf", true, "/a/mm.gguf", true));
+        assert!(mmproj_cache_matches(
+            "/a/mm.gguf",
+            false,
+            "/a/mm.gguf",
+            true
+        ));
+        assert!(!mmproj_cache_matches(
+            "/a/mm.gguf",
+            true,
+            "/a/mm.gguf",
+            false
+        ));
+        assert!(!mmproj_cache_matches(
+            "/a/mm.gguf",
+            true,
+            "/b/mm.gguf",
+            true
+        ));
     }
 }

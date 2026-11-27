@@ -64,7 +64,8 @@ fn open_path_in_file_manager(dialog: &adw::PreferencesDialog, path: &Path, is_fi
     gtk::glib::MainContext::default().spawn_local(async move {
         if !is_file {
             let dir_path = path.clone();
-            let dir_res = gio::spawn_blocking(move || std::fs::create_dir_all(&dir_path)).await;
+            let dir_res =
+                gio::spawn_blocking(move || crate::core::paths::ensure_dir(&dir_path)).await;
             if let Ok(Err(err)) = dir_res {
                 dialog.add_toast(adw::Toast::new(&tr_f(
                     "Failed to open folder: {err}",

@@ -16,14 +16,14 @@ use crate::ui::sidebar::{SidebarModel, SidebarMsg, SidebarOutput};
 
 pub struct MainWindow {
     services: Arc<AppServices>,
-    sidebar: Controller<SidebarModel>,
+    pub(super) sidebar: Controller<SidebarModel>,
     chat_view: Controller<ChatViewModel>,
     active_conversation: Option<Conversation>,
     conv_select_seq: u64,
     active_model: Option<ModelRecord>,
     hardware_info: Option<HardwareInfo>,
     toast_overlay: adw::ToastOverlay,
-    split_view: adw::NavigationSplitView,
+    pub(super) split_view: adw::NavigationSplitView,
 }
 
 #[derive(Debug)]
@@ -56,6 +56,8 @@ pub enum MainWindowMsg {
     HardwareProbed(HardwareInfo),
     OpenModelManager,
     OpenPreferences,
+    FocusSearch,
+    StopGeneration,
     ShowToast(String),
     NewChat,
 }
@@ -171,6 +173,7 @@ impl SimpleComponent for MainWindow {
             toast_overlay: toast_overlay.clone(),
             split_view: split_view.clone(),
         };
+        super::window_actions::register_window_actions(&root, &sender);
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
@@ -207,12 +210,7 @@ impl SimpleComponent for MainWindow {
             MainWindowMsg::StartupDataLoaded {
                 active_model,
                 color_scheme,
-            } => {
-                crate::ui::preferences::apply_color_scheme_setting(color_scheme.as_deref());
-                let model_id = active_model.as_ref().map(|m| m.id.clone());
-                self.active_model = active_model;
-                self.chat_view.emit(ChatViewMsg::RefreshModels(model_id));
-            }
+            } => self.on_startup_data_loaded(active_model, color_scheme),
             MainWindowMsg::HardwareProbed(hw) => self.hardware_info = Some(hw),
             MainWindowMsg::ChatRunningChanged { id, is_running } => {
                 self.sidebar
@@ -220,6 +218,10 @@ impl SimpleComponent for MainWindow {
             }
             MainWindowMsg::OpenModelManager => self.open_settings(SettingsPage::Models, &sender),
             MainWindowMsg::OpenPreferences => self.open_settings(SettingsPage::General, &sender),
+            MainWindowMsg::FocusSearch => self.focus_search(),
+            MainWindowMsg::StopGeneration => {
+                self.chat_view.emit(ChatViewMsg::StopGeneration);
+            }
             MainWindowMsg::ShowToast(text) => self.toast_overlay.add_toast(adw::Toast::new(&text)),
             MainWindowMsg::NewChat => self.sidebar.emit(SidebarMsg::NewChat),
         }
@@ -227,6 +229,17 @@ impl SimpleComponent for MainWindow {
 }
 
 impl MainWindow {
+    fn on_startup_data_loaded(
+        &mut self,
+        active_model: Option<ModelRecord>,
+        color_scheme: Option<String>,
+    ) {
+        crate::ui::preferences::apply_color_scheme_setting(color_scheme.as_deref());
+        let model_id = active_model.as_ref().map(|m| m.id.clone());
+        self.active_model = active_model;
+        self.chat_view.emit(ChatViewMsg::RefreshModels(model_id));
+    }
+
     fn on_conversation_selected(&mut self, conv_id: String, sender: &ComponentSender<Self>) {
         self.conv_select_seq = self.conv_select_seq.wrapping_add(1);
         let (req_seq, db, input_sender) = (
@@ -337,7 +350,6 @@ fn launch_sidebar(
                 MainWindowMsg::ConversationRenamed { id, title }
             }
             SidebarOutput::ConversationDeleted(id) => MainWindowMsg::ConversationDeleted(id),
-            SidebarOutput::OpenSettings => MainWindowMsg::OpenPreferences,
             SidebarOutput::ShowToast(text) => MainWindowMsg::ShowToast(text),
         })
 }

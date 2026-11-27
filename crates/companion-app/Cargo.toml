@@ -9,6 +9,10 @@ description = "A native GNOME AI agent application with embedded local inference
 name = "companion"
 path = "src/main.rs"
 
+[features]
+experimental-mcp = []
+experimental-audio = []
+
 [lints]
 workspace = true
 

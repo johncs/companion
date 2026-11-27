@@ -71,19 +71,7 @@ pub(super) fn attach_key_controller(
 
 /// Remove orphaned clipboard temp images left behind by previous runs.
 pub fn cleanup_orphaned_clipboard_files(clipboard_dir: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(clipboard_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_pasted_png = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("pasted-") && n.ends_with(".png"));
-        if is_pasted_png && path.is_file() {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
+    crate::core::paths::cleanup_orphaned_clipboard_files(clipboard_dir);
 }
 
 /// Handle image/file paste into the composer, or trim trailing blank lines on text paste.
@@ -153,10 +141,13 @@ fn paste_texture_from_clipboard(
             spawn_blocking_ui(
                 &rt_handle,
                 move || {
-                    std::fs::create_dir_all(&dest_dir)
-                        .and_then(|_| std::fs::write(&dest_path, png_bytes.as_ref()))
-                        .map(|_| dest_path)
-                        .map_err(|e| e.to_string())
+                    crate::core::paths::write_bytes_in_dir(
+                        &dest_dir,
+                        &dest_path,
+                        png_bytes.as_ref(),
+                    )
+                    .map(|_| dest_path)
+                    .map_err(|e| e.to_string())
                 },
                 move |io_res| match io_res {
                     Ok(path) => sender_ui.input(ComposerMsg::FilesDropped(vec![path])),

@@ -134,12 +134,7 @@ struct SearchRunner {
 
 impl SearchRunner {
     fn run(self: &Rc<Self>, query: String) {
-        clear_preferences_group(&self.results_group);
-        let loading = adw::ActionRow::builder()
-            .title(gettext("Searching Hugging Face…"))
-            .sensitive(false)
-            .build();
-        self.results_group.add(&loading);
+        show_search_loading_row(&self.results_group);
 
         let req_seq = self.search_seq.get().wrapping_add(1);
         self.search_seq.set(req_seq);
@@ -181,6 +176,20 @@ impl SearchRunner {
             }
         });
     }
+}
+
+fn show_search_loading_row(results_group: &adw::PreferencesGroup) {
+    clear_preferences_group(results_group);
+    let loading = adw::ActionRow::builder()
+        .title(gettext("Searching Hugging Face…"))
+        .sensitive(false)
+        .build();
+    let spinner = gtk::Spinner::builder()
+        .spinning(true)
+        .valign(gtk::Align::Center)
+        .build();
+    loading.add_prefix(&spinner);
+    results_group.add(&loading);
 }
 
 fn build_search_error_row(err_msg: &str, query: &str, runner: &Rc<SearchRunner>) -> adw::ActionRow {

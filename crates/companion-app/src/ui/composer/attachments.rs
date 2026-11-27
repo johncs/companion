@@ -107,7 +107,7 @@ pub(super) fn classify_dropped_paths(
             let mut files = Vec::new();
             for path in paths {
                 if path.is_dir() {
-                    dirs.push(std::fs::canonicalize(&path).unwrap_or(path));
+                    dirs.push(crate::core::paths::canonicalize_or_self(path));
                 } else if path.is_file() {
                     files.push(path);
                 }
@@ -139,10 +139,11 @@ pub(super) fn enqueue_classified_files(
         }
 
         let temp_id = uuid::Uuid::new_v4().to_string();
+        let fallback = gettext("file");
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("file")
+            .unwrap_or(&fallback)
             .to_string();
         queue.push_loading(temp_id.clone(), file_name);
         rebuild_chips_box(chips_box, queue, sender);

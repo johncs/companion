@@ -5,19 +5,38 @@
   <project_license>GPL-3.0-or-later</project_license>
 
   <name>Companion</name>
-  <summary>Native GNOME AI agent for local models and projects</summary>
+  <summary>Native GNOME AI agent for local models and Files &amp; Folders</summary>
 
   <description>
     <p>
       Companion is a native GNOME AI agent application built with GTK4 and libadwaita.
-      Run local GGUF models out of the box, organize folder-scoped Projects, attach
+      Run local GGUF models out of the box, grant folder-scoped file access, attach
       documents and images, and collaborate with AI safely on your desktop.
     </p>
   </description>
 
   <launchable type="desktop-id">@app_id@.desktop</launchable>
 
-  <url type="homepage">https://github.com/companion-app/companion</url>
+  <translation type="gettext">companion</translation>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#3584e4</color>
+    <color type="primary" scheme_preference="dark">#1c71d8</color>
+  </branding>
+
+  <url type="homepage">https://github.com/johncs/companion</url>
+  <url type="bugtracker">https://github.com/johncs/companion/issues</url>
+  <url type="vcs-browser">https://github.com/johncs/companion</url>
 
   <developer id="io.github.companion">
     <name>Companion Contributors</name>
@@ -26,9 +45,9 @@
   <content_rating type="oars-1.1" />
 
   <releases>
-    <release version="0.1.0" date="2026-11-20">
+    <release version="0.1.0" date="2026-11-27">
       <description>
-        <p>Initial Sprint 0 project skeleton.</p>
+        <p>Local GGUF model management, folder-scoped agent tools, multimodal attachments, and GNOME desktop integration.</p>
       </description>
     </release>
   </releases>

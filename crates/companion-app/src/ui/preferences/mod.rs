@@ -278,9 +278,14 @@ fn build_agent_page<W>(
 where
     W: Fn(bool) + 'static,
 {
+    let page_title = if cfg!(feature = "experimental-mcp") {
+        gettext("Agent & MCP")
+    } else {
+        gettext("Agent & Tools")
+    };
     let agent_page = adw::PreferencesPage::builder()
         .name("agent")
-        .title(gettext("Agent & MCP"))
+        .title(page_title)
         .icon_name("applications-science-symbolic")
         .build();
 
@@ -295,12 +300,14 @@ where
     agent_page.add(&web_search_group);
     agent_page.add(&tools_group);
 
-    let agent_group = adw::PreferencesGroup::builder()
-        .title(gettext("External MCP Servers"))
-        .description(gettext(
-            "External MCP server connections will be configured here.",
-        ))
-        .build();
-    agent_page.add(&agent_group);
+    if cfg!(feature = "experimental-mcp") {
+        let agent_group = adw::PreferencesGroup::builder()
+            .title(gettext("External MCP Servers"))
+            .description(gettext(
+                "External MCP server connections will be configured here.",
+            ))
+            .build();
+        agent_page.add(&agent_group);
+    }
     agent_page
 }

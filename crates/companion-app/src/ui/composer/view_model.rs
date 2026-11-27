@@ -39,7 +39,11 @@ impl ComposerViewModel {
             } else {
                 gettext("Read-Only")
             };
-            tip.push_str(&format!("\n• {} ({mode_label})", f.folder_path));
+            tip.push('\n');
+            tip.push_str(&tr_f(
+                "• {folder} ({mode})",
+                &[("folder", &f.folder_path), ("mode", &mode_label)],
+            ));
         }
         (true, tip)
     }

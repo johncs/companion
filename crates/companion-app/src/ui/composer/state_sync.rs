@@ -96,6 +96,12 @@ pub(super) fn wire_composer_text_view(
     rt_handle: tokio::runtime::Handle,
     sender: &ComponentSender<ComposerModel>,
 ) {
+    text_view.update_property(&[gtk::accessible::Property::Label(&crate::i18n::gettext(
+        "Message input",
+    ))]);
+    text_view.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+        placeholder.upcast_ref()
+    ])]);
     let placeholder = placeholder.clone();
     text_view.buffer().connect_changed(move |buf| {
         placeholder.set_visible(buf.char_count() == 0);

@@ -197,7 +197,7 @@ fn run_grant_refresh_pass(
                 &dir_entries,
                 false,
                 &gettext("No folders granted"),
-                &gettext("Click + to grant access to a folder"),
+                &gettext("Add a folder to grant access"),
                 &state_ui,
             );
             populate_grant_group(
@@ -205,7 +205,7 @@ fn run_grant_refresh_pass(
                 &file_entries,
                 true,
                 &gettext("No files granted"),
-                &gettext("Click + to grant access to a file"),
+                &gettext("Add a file to grant access"),
                 &state_ui,
             );
         },
@@ -229,8 +229,7 @@ fn make_grant_chosen_handler(
                 if let Some(parent_name) = find_covering_granted_folder(&existing, &path) {
                     return Ok(Some(parent_name));
                 }
-                let path_str = std::fs::canonicalize(&path)
-                    .unwrap_or(path)
+                let path_str = crate::core::paths::canonicalize_or_self(path)
                     .to_string_lossy()
                     .to_string();
                 db.add_conversation_folder(&cid, &path_str)

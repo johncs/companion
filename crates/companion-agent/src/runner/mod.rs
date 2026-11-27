@@ -134,9 +134,9 @@ impl AgentRunner {
                 .await;
             push_tool_feedback_turns(&mut cfg, step_out.step_answer, &tool_feedback);
             if step + 1 == MAX_AGENT_STEPS {
-                let _ = tx.send(AgentEvent::Notice(
-                    "Reached maximum tool call steps for this turn.".to_string(),
-                ));
+                let _ = tx.send(AgentEvent::Notice(companion_core::i18n::gettext(
+                    "Reached maximum tool call steps for this turn.",
+                )));
             }
         }
         let fin = FinalizeRunArgs {

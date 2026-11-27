@@ -56,7 +56,7 @@ pub enum SidebarMsg {
         is_running: bool,
     },
     RefreshLists,
-    OpenSettings,
+    FocusSearch,
 }
 
 #[derive(Debug)]
@@ -64,7 +64,6 @@ pub enum SidebarOutput {
     ConversationSelected(String),
     ConversationRenamed { id: String, title: String },
     ConversationDeleted(String),
-    OpenSettings,
     ShowToast(String),
 }
 
@@ -78,6 +77,8 @@ pub struct SidebarModel {
     chats_list: gtk::ListBox,
     search_list: gtk::ListBox,
     search_section: gtk::Box,
+    search_bar: gtk::SearchBar,
+    search_entry: gtk::SearchEntry,
 }
 
 #[relm4::component(pub)]
@@ -103,10 +104,10 @@ impl SimpleComponent for SidebarModel {
                 set_title_widget = &adw::WindowTitle {
                     set_title: "Companion",
                 },
-                pack_end = &gtk::Button {
-                    set_icon_name: "preferences-system-symbolic",
-                    set_tooltip_text: Some(&gettext("Settings")),
-                    connect_clicked => SidebarMsg::OpenSettings,
+                pack_end = &gtk::MenuButton {
+                    set_icon_name: "open-menu-symbolic",
+                    set_tooltip_text: Some(&gettext("Main Menu")),
+                    set_menu_model: Some(&build_primary_menu()),
                 },
             },
 
@@ -179,6 +180,8 @@ impl SimpleComponent for SidebarModel {
             chats_list,
             search_list,
             search_section,
+            search_bar: widgets.search_bar.clone(),
+            search_entry: widgets.search_entry.clone(),
         };
         model.rebuild_lists(&sender);
         ComponentParts { model, widgets }
@@ -228,7 +231,10 @@ impl SimpleComponent for SidebarModel {
                 }
             }
             SidebarMsg::RefreshLists => self.rebuild_lists(&sender),
-            SidebarMsg::OpenSettings => drop(sender.output(SidebarOutput::OpenSettings)),
+            SidebarMsg::FocusSearch => {
+                self.search_bar.set_search_mode(true);
+                self.search_entry.grab_focus();
+            }
         }
     }
 }
@@ -367,4 +373,20 @@ impl SidebarModel {
             });
         });
     }
+}
+
+fn build_primary_menu() -> gtk::gio::Menu {
+    let menu = gtk::gio::Menu::new();
+    let main_sec = gtk::gio::Menu::new();
+    main_sec.append(Some(&gettext("New Chat")), Some("win.new-chat"));
+    main_sec.append(Some(&gettext("Preferences")), Some("win.preferences"));
+    menu.append_section(None, &main_sec);
+    let help_sec = gtk::gio::Menu::new();
+    help_sec.append(
+        Some(&gettext("Keyboard Shortcuts")),
+        Some("win.show-help-overlay"),
+    );
+    help_sec.append(Some(&gettext("About Companion")), Some("win.about"));
+    menu.append_section(None, &help_sec);
+    menu
 }

@@ -18,7 +18,7 @@ pub fn new_nav_list() -> gtk::ListBox {
     gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .activate_on_single_click(true)
-        .css_classes(["navigation-sidebar"])
+        .css_classes(["navigation-sidebar", "companion-sidebar"])
         .build()
 }
 

@@ -1,4 +1,4 @@
-/* Companion minimal GNOME HIG styles (adapts to light/dark & system accent color) */
+/* Companion minimal GNOME HIG styles (adapts to light, dark & high-contrast themes) */
 
 listview.chat-list {
     background: transparent;
@@ -13,7 +13,6 @@ listview.chat-list > row {
     background: transparent;
     border: none;
     box-shadow: none;
-    outline: none;
 }
 
 listview.chat-list > row:hover,
@@ -27,25 +26,25 @@ listview.chat-list > row:selected {
 }
 
 .user-bubble {
-    background-color: alpha(@accent_bg_color, 0.14);
+    background-color: color-mix(in srgb, var(--accent-bg-color) 14%, transparent);
     border-radius: 18px;
 }
 
 .assistant-bubble {
-    background-color: alpha(@window_fg_color, 0.05);
+    background-color: color-mix(in srgb, var(--window-fg-color) 5%, transparent);
     border-radius: 18px;
 }
 
 .composer-card {
-    background-color: @card_bg_color;
+    background-color: var(--card-bg-color);
     border-radius: 22px;
-    border: 1px solid alpha(@window_fg_color, 0.10);
-    box-shadow: 0 2px 10px alpha(black, 0.06);
+    border: 1px solid color-mix(in srgb, var(--window-fg-color) 10%, transparent);
+    box-shadow: 0 2px 10px color-mix(in srgb, black 6%, transparent);
     transition: border-color 150ms ease;
 }
 
 .composer-card:focus-within {
-    border-color: alpha(@accent_bg_color, 0.65);
+    border-color: color-mix(in srgb, var(--accent-bg-color) 65%, transparent);
 }
 
 textview.composer-input,
@@ -54,37 +53,13 @@ textview.composer-input text {
 }
 
 .code-card {
-    background-color: @view_bg_color;
+    background-color: var(--view-bg-color);
     border-radius: 14px;
-    border: 1px solid alpha(@window_fg_color, 0.14);
-}
-
-.thinking-expander {
-    background-color: alpha(@window_fg_color, 0.03);
-    border-radius: 14px;
-    border: 1px solid alpha(@window_fg_color, 0.07);
-    padding: 6px 12px;
-}
-
-dropdown.pill-dropdown > button {
-    border-radius: 9999px;
-    min-height: 28px;
-    padding: 2px 10px;
-}
-
-popover.model-popover contents {
-    padding: 6px;
-}
-
-button.popover-item {
-    border-radius: 9px;
-    padding: 6px 10px;
-    min-height: 34px;
-    font-weight: normal;
+    border: 1px solid color-mix(in srgb, var(--window-fg-color) 14%, transparent);
 }
 
 .attachment-chip {
-    background-color: alpha(@window_fg_color, 0.08);
+    background-color: color-mix(in srgb, var(--window-fg-color) 8%, transparent);
     border-radius: 9999px;
     padding: 3px 10px;
 }
@@ -104,46 +79,46 @@ button.thumb-remove-btn {
     padding: 0;
     margin: 2px;
     border-radius: 9999px;
-    background-color: alpha(black, 0.62);
+    background-color: color-mix(in srgb, black 62%, transparent);
     color: white;
 }
 
 button.thumb-remove-btn:hover {
-    background-color: alpha(black, 0.85);
+    background-color: color-mix(in srgb, black 85%, transparent);
 }
 
 .doc-tile {
-    background-color: alpha(@window_fg_color, 0.06);
+    background-color: color-mix(in srgb, var(--window-fg-color) 6%, transparent);
     border-radius: 12px;
-    border: 1px solid alpha(@window_fg_color, 0.08);
+    border: 1px solid color-mix(in srgb, var(--window-fg-color) 8%, transparent);
 }
 
 .drop-zone-overlay {
-    background-color: alpha(@window_bg_color, 0.86);
-    border: 2px dashed alpha(@accent_bg_color, 0.75);
+    background-color: color-mix(in srgb, var(--window-bg-color) 86%, transparent);
+    border: 2px dashed color-mix(in srgb, var(--accent-bg-color) 75%, transparent);
     border-radius: 20px;
 }
 
 .markdown-blockquote {
-    border-left: 3px solid alpha(@accent_bg_color, 0.7);
+    border-left: 3px solid color-mix(in srgb, var(--accent-bg-color) 70%, transparent);
     padding: 4px 12px;
-    background-color: alpha(@window_fg_color, 0.03);
+    background-color: color-mix(in srgb, var(--window-fg-color) 3%, transparent);
     border-radius: 0 8px 8px 0;
 }
 
 .markdown-table-card {
-    background-color: alpha(@window_fg_color, 0.03);
+    background-color: color-mix(in srgb, var(--window-fg-color) 3%, transparent);
     border-radius: 12px;
-    border: 1px solid alpha(@window_fg_color, 0.1);
+    border: 1px solid color-mix(in srgb, var(--window-fg-color) 10%, transparent);
 }
 
 .markdown-table-header {
-    background-color: alpha(@window_fg_color, 0.06);
-    border-bottom: 1px solid alpha(@window_fg_color, 0.12);
+    background-color: color-mix(in srgb, var(--window-fg-color) 6%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--window-fg-color) 12%, transparent);
 }
 
 .markdown-table-cell {
-    border-bottom: 1px solid alpha(@window_fg_color, 0.06);
+    border-bottom: 1px solid color-mix(in srgb, var(--window-fg-color) 6%, transparent);
 }
 
 .message-actions {
@@ -173,20 +148,20 @@ button.thinking-chip-btn {
     min-width: 0;
     padding: 2px 8px;
     border-radius: 9999px;
-    background-color: alpha(@window_fg_color, 0.06);
+    background-color: color-mix(in srgb, var(--window-fg-color) 6%, transparent);
 }
 
 button.thinking-chip-btn:hover {
-    background-color: alpha(@window_fg_color, 0.11);
+    background-color: color-mix(in srgb, var(--window-fg-color) 11%, transparent);
 }
 
-/* GNOME navigation-sidebar styling for sidebar chat lists */
-list.navigation-sidebar {
+/* Scoped sidebar styling so list.navigation-sidebar doesn't bleed into MentionPicker */
+list.companion-sidebar {
     background: transparent;
     padding: 0;
 }
 
-list.navigation-sidebar > row {
+list.companion-sidebar > row {
     border-radius: 8px;
     margin: 1px 0;
     padding: 4px 8px;
@@ -194,8 +169,8 @@ list.navigation-sidebar > row {
     font-weight: 400;
 }
 
-list.navigation-sidebar > row.sidebar-active-row {
-    background-color: alpha(@window_fg_color, 0.10);
+list.companion-sidebar > row.sidebar-active-row {
+    background-color: color-mix(in srgb, var(--window-fg-color) 10%, transparent);
     font-weight: 400;
 }
 
@@ -204,8 +179,8 @@ list.navigation-sidebar > row.sidebar-active-row {
     transition: opacity 150ms ease;
 }
 
-list.navigation-sidebar > row:hover .sidebar-row-menu,
-list.navigation-sidebar > row.sidebar-active-row .sidebar-row-menu,
+list.companion-sidebar > row:hover .sidebar-row-menu,
+list.companion-sidebar > row.sidebar-active-row .sidebar-row-menu,
 .sidebar-row-menu:focus-within,
 .sidebar-row-menu.menu-open {
     opacity: 1;
@@ -215,7 +190,7 @@ scrolledwindow.card {
     border-radius: 12px;
 }
 
-scrolledwindow.card textview,
-scrolledwindow.card textview > text {
+.card textview,
+.card textview > text {
     background: transparent;
 }

@@ -3,7 +3,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -112,16 +111,11 @@ fn style_thumb_image(img: &gtk::Image, max_size: i32) {
 async fn decode_texture_async(path_owned: String) -> Option<(TextureKey, gdk::Texture)> {
     gio::spawn_blocking(move || {
         let path = PathBuf::from(&path_owned);
-        let meta = std::fs::metadata(&path).ok()?;
+        let (mtime_secs, file_len) = crate::core::paths::file_mtime_and_len(&path)?;
         let key = TextureKey {
             path: path_owned,
-            mtime_secs: meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            file_len: meta.len(),
+            mtime_secs,
+            file_len,
         };
         gdk::Texture::from_file(&gio::File::for_path(&path))
             .ok()

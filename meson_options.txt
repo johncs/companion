@@ -1,0 +1,6 @@
+option(
+  'offline',
+  type: 'boolean',
+  value: false,
+  description: 'Pass --offline to cargo for sandboxed or Flatpak builds',
+)

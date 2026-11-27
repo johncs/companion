@@ -77,13 +77,43 @@ fn fetch_and_populate_repo_files(
             Ok(Err(err)) => {
                 *loaded_flag.borrow_mut() = false;
                 placeholder.set_title(&crate::format::markdown::escape_pango_markup(&tr_f(
-                    "Failed to load files (re-expand to retry): {err}",
+                    "Failed to load files: {err}",
                     &[("err", &err.to_string())],
                 )));
+                attach_repo_retry_button(&exp, &placeholder, &rid, &ctx, &loaded_flag);
             }
             Err(_) => *loaded_flag.borrow_mut() = false,
         }
     });
+}
+
+fn attach_repo_retry_button(
+    exp: &adw::ExpanderRow,
+    placeholder: &adw::ActionRow,
+    repo_id: &str,
+    ctx: &HfBrowserContext,
+    loaded: &Rc<RefCell<bool>>,
+) {
+    let retry_btn = gtk::Button::builder()
+        .label(gettext("Retry"))
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    let (exp, ph, rid, ctx, loaded) = (
+        exp.clone(),
+        placeholder.clone(),
+        repo_id.to_string(),
+        ctx.clone(),
+        loaded.clone(),
+    );
+    let btn_ref = retry_btn.clone();
+    retry_btn.connect_clicked(move |_| {
+        ph.remove(&btn_ref);
+        ph.set_title(&gettext("Loading files…"));
+        *loaded.borrow_mut() = true;
+        fetch_and_populate_repo_files(&exp, &ph, &rid, &ctx, &loaded);
+    });
+    placeholder.add_suffix(&retry_btn);
 }
 
 fn populate_repo_files(
