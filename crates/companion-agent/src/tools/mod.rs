@@ -13,7 +13,9 @@ mod write_tools;
 
 pub use destructive_tools::{DeleteDirectoryTool, DeleteFileTool};
 pub use fs_ops::list_granted_files;
-pub use path_guard::{GrantedFolder, find_covering_granted_folder};
+#[cfg(test)]
+pub(crate) use fs_ops::read_granted_file;
+pub use path_guard::{GrantedFolder, find_covering_granted_folder, resolve_granted_path};
 pub use read_tools::{ListFilesTool, ReadFileTool, SearchFilesTool};
 pub use web_tools::{FetchUrlTool, WebSearchTool};
 pub use write_tools::{CreateDirectoryTool, MovePathTool, WriteFileTool};

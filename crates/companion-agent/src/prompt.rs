@@ -1,12 +1,15 @@
 //! Pure prompt assembly from domain history, granted folders, and personalization settings.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use crate::path_mentions::{detect_existing_os_paths_in_text, extract_mentioned_os_paths};
 use crate::registry::ToolRegistry;
-use crate::tools::GrantedFolder;
+use crate::tools::{GrantedFolder, resolve_granted_path};
 use companion_core::prompt::{PersonalizationProfile, compose_personalized_system_prompt};
 use companion_core::provider::{ChatRole, ChatTurn};
 use companion_core::types::{MessageRole, StagedAttachment};
-use companion_format::attachments::format_attachments_for_prompt;
+use companion_format::attachments::{AttachmentKind, classify_path, format_attachments_for_prompt};
 use companion_storage::settings::PersonalizationSettings;
 
 /// UI-agnostic message + attachments item used to construct model prompt turns.
@@ -60,7 +63,7 @@ pub fn build_prompt_turns(ctx: &PromptContext<'_>) -> Vec<ChatTurn> {
     let start = ctx.history.len().saturating_sub(48);
     let history_slice = &ctx.history[start..];
     for msg in history_slice {
-        if let Some(turn) = message_to_chat_turn(msg) {
+        if let Some(turn) = message_to_chat_turn(msg, ctx.granted_folders) {
             turns.push(turn);
         }
     }
@@ -101,18 +104,24 @@ fn append_folder_context(
     sys_prompt.push_str(workspace_instructions);
 }
 
-fn message_to_chat_turn(msg: &MessageWithAttachments) -> Option<ChatTurn> {
+fn message_to_chat_turn(
+    msg: &MessageWithAttachments,
+    granted_folders: &[GrantedFolder],
+) -> Option<ChatTurn> {
     let role = match msg.role {
         MessageRole::User => ChatRole::User,
         MessageRole::System => ChatRole::System,
         MessageRole::Assistant => ChatRole::Assistant,
     };
-    let images: Vec<String> = msg
+    let mut images: Vec<String> = msg
         .attachments
         .iter()
         .filter(|a| a.mime_type.starts_with("image/"))
         .map(|a| a.file_path.clone())
         .collect();
+    if msg.role == MessageRole::User {
+        append_granted_mentioned_images(&mut images, &msg.content, granted_folders);
+    }
     let text_only: Vec<StagedAttachment> = msg
         .attachments
         .iter()
@@ -135,11 +144,65 @@ fn message_to_chat_turn(msg: &MessageWithAttachments) -> Option<ChatTurn> {
     })
 }
 
+fn append_granted_mentioned_images(
+    images: &mut Vec<String>,
+    content: &str,
+    granted_folders: &[GrantedFolder],
+) {
+    if granted_folders.is_empty() {
+        return;
+    }
+    for candidate in extract_mentioned_os_paths(content)
+        .into_iter()
+        .chain(detect_existing_os_paths_in_text(content))
+    {
+        if classify_path(&candidate) != AttachmentKind::Image {
+            continue;
+        }
+        if let Some(verified) = resolve_granted_image(granted_folders, &candidate) {
+            let s = verified.to_string_lossy().to_string();
+            if !images.contains(&s) {
+                images.push(s);
+            }
+        }
+    }
+}
+
+fn resolve_granted_image(
+    granted_folders: &[GrantedFolder],
+    candidate: &Path,
+) -> Option<std::path::PathBuf> {
+    for folder in granted_folders {
+        let Ok(canon_root) = std::fs::canonicalize(&folder.path) else {
+            continue;
+        };
+        if canon_root.is_file() {
+            if canon_root == candidate && candidate.is_file() {
+                return Some(canon_root);
+            }
+            continue;
+        }
+        if let Ok(rel) = candidate.strip_prefix(&canon_root)
+            && let Some(rel_str) = rel.to_str()
+            && !rel_str.is_empty()
+            && let Ok(resolved) = resolve_granted_path(&folder.path, rel_str)
+            && resolved.is_file()
+        {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 fn append_mentioned_os_paths(
     turns: &mut [ChatTurn],
     history: &[MessageWithAttachments],
     workspace_instructions: &str,
 ) {
+    let attached_images: HashSet<String> = turns
+        .iter()
+        .flat_map(|t| t.images.iter().cloned())
+        .collect();
     let mut mentioned_dirs: Vec<String> = Vec::new();
     for msg in history {
         if msg.role == MessageRole::User {
@@ -148,7 +211,7 @@ fn append_mentioned_os_paths(
                 .chain(detect_existing_os_paths_in_text(&msg.content))
             {
                 let s = p.to_string_lossy().to_string();
-                if !mentioned_dirs.contains(&s) {
+                if !attached_images.contains(&s) && !mentioned_dirs.contains(&s) {
                     mentioned_dirs.push(s);
                 }
             }
@@ -275,5 +338,59 @@ mod tests {
         assert!(!att_turns[0].content.contains("User-mentioned OS paths"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attaches_granted_mentioned_images_only_and_read_file_hints_images() {
+        let base = std::env::temp_dir().join(format!("companion_img_{}", uuid::Uuid::new_v4()));
+        let (granted, ungranted) = (base.join("granted"), base.join("ungranted"));
+        std::fs::create_dir_all(&granted).unwrap();
+        std::fs::create_dir_all(&ungranted).unwrap();
+        let ok_img = granted.join("car.jpg");
+        let blocked_img = ungranted.join("secret.jpg");
+        std::fs::write(&ok_img, b"\xff\xd8\xff\x00jpeg").unwrap();
+        std::fs::write(&blocked_img, b"\xff\xd8\xff\x00jpeg").unwrap();
+
+        let err = crate::tools::read_granted_file(&granted, "car.jpg").unwrap_err();
+        assert!(err.to_string().contains("is an image file"));
+
+        let turns = build_prompt_turns(&PromptContext {
+            chat_system_prompt: "",
+            personalization: &sample_personalization(),
+            granted_folders: &[GrantedFolder {
+                path: granted.clone(),
+                allow_write: false,
+            }],
+            web_search_active: false,
+            history: &[MessageWithAttachments {
+                role: MessageRole::User,
+                content: format!(
+                    "Compare @{} and @{}",
+                    ok_img.display(),
+                    blocked_img.display()
+                ),
+                attachments: Vec::new(),
+            }],
+            registry: &ToolRegistry::with_builtins(std::sync::Arc::new(
+                crate::web_search::WebSearchService::new().unwrap(),
+            )),
+        });
+        let canon_ok = std::fs::canonicalize(&ok_img).unwrap();
+        let canon_blocked = std::fs::canonicalize(&blocked_img).unwrap();
+        assert_eq!(
+            turns[1].images,
+            vec![canon_ok.to_string_lossy().to_string()]
+        );
+        assert!(
+            !turns[0]
+                .content
+                .contains(&canon_ok.to_string_lossy().to_string())
+        );
+        assert!(
+            turns[0]
+                .content
+                .contains(&canon_blocked.to_string_lossy().to_string())
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

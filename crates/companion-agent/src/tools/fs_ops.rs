@@ -48,6 +48,13 @@ pub fn read_granted_file(granted_root: &Path, rel_path: &str) -> Result<String> 
     let (bytes, truncated) = read_bounded_bytes(&target, MAX_READ_BYTES)
         .with_context(|| format!("Failed to read {rel_path}"))?;
     if bytes.iter().take(4096).any(|&b| b == 0) {
+        if companion_format::attachments::classify_path(&target)
+            == companion_format::attachments::AttachmentKind::Image
+        {
+            bail!(
+                "'{rel_path}' is an image file and cannot be read as UTF-8 text. Ask the user to attach or drag-and-drop the image if it is not already visible in the conversation."
+            );
+        }
         bail!("'{rel_path}' appears to be a binary file");
     }
     if truncated {
