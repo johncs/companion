@@ -194,3 +194,15 @@ scrolledwindow.card {
 .card textview > text {
     background: transparent;
 }
+
+.shortcut-keycap {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    font-size: 0.92rem;
+    font-weight: 500;
+    background-color: color-mix(in srgb, var(--window-fg-color) 11%, transparent);
+    box-shadow: 0 1px 0 color-mix(in srgb, black 24%, transparent),
+        inset 0 0 0 1px color-mix(in srgb, var(--window-fg-color) 8%, transparent);
+}

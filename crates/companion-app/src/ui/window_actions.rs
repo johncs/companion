@@ -98,23 +98,24 @@ fn present_about_dialog(parent: &adw::ApplicationWindow) {
 fn present_shortcuts_dialog(parent: &adw::ApplicationWindow) {
     let dialog = adw::Dialog::builder()
         .title(gettext("Keyboard Shortcuts"))
-        .content_width(440)
-        .content_height(380)
+        .content_width(480)
+        .content_height(460)
         .build();
 
     let group = adw::PreferencesGroup::builder()
         .title(gettext("General"))
         .build();
-    for (title, accel) in [
-        (gettext("New Chat"), "<Control>n"),
-        (gettext("Search Chats"), "<Control>f"),
-        (gettext("Preferences"), "<Control>comma"),
-        (gettext("Keyboard Shortcuts"), "<Control>question"),
-        (gettext("Stop Generation"), "Escape"),
-        (gettext("Send Message"), "<Control>Return"),
-    ] {
+    let shortcuts: [(String, &[&str]); 6] = [
+        (gettext("New Chat"), &["Ctrl", "N"]),
+        (gettext("Search Chats"), &["Ctrl", "F"]),
+        (gettext("Preferences"), &["Ctrl", ","]),
+        (gettext("Keyboard Shortcuts"), &["Ctrl", "?"]),
+        (gettext("Stop Generation"), &["Esc"]),
+        (gettext("Send Message"), &["Ctrl", "↵"]),
+    ];
+    for (title, keys) in shortcuts {
         let row = adw::ActionRow::builder().title(title).build();
-        row.add_suffix(&gtk::ShortcutLabel::new(accel));
+        row.add_suffix(&build_keycaps_box(keys));
         group.add(&row);
     }
 
@@ -125,6 +126,24 @@ fn present_shortcuts_dialog(parent: &adw::ApplicationWindow) {
     toolbar.set_content(Some(&page));
     dialog.set_child(Some(&toolbar));
     dialog.present(Some(parent));
+}
+
+fn build_keycaps_box(keys: &[&str]) -> gtk::Box {
+    let box_ = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .valign(gtk::Align::Center)
+        .build();
+    for key in keys {
+        let cap = gtk::Label::builder()
+            .label(*key)
+            .xalign(0.5)
+            .valign(gtk::Align::Center)
+            .css_classes(["shortcut-keycap"])
+            .build();
+        box_.append(&cap);
+    }
+    box_
 }
 
 impl MainWindow {
