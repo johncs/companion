@@ -20,6 +20,9 @@ jobs:
             cmake \
             gcc-c++ \
             clang \
+            glslc \
+            vulkan-headers \
+            vulkan-loader-devel \
             pkgconf-pkg-config \
             gettext \
             desktop-file-utils \
